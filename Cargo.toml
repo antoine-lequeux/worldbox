@@ -4,27 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bevy = { version = "0.18.1", default-features = false, features = [
-    # Core
-    "bevy_asset",
-    "bevy_state",
-    "bevy_winit", 
-    "bevy_core_pipeline",
-    "bevy_render",
-    
-    # 2D
-    "bevy_sprite", 
-    "bevy_text",  
-    "bevy_ui", 
-    
-    # Audio/images
-    "vorbis", 
-    "png",  
-    
-    "dynamic_linking"
-] }
+bevy = { version = "0.18.1", features = ["dynamic_linking"] }
 pathfinding = "4.14.0"
 noise = { version = "0.9.0", features = ["images"] }
+bevy_ecs_tilemap = "0.18.1"
 
 [profile.dev]
 opt-level = 1
