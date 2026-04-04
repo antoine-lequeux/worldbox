@@ -12,7 +12,7 @@ impl Default for MainCamera
 {
     fn default() -> Self
     {
-        Self { pan_velocity: Vec2::ZERO, scroll_velocity: 0.0, is_dragging: false }
+        return Self { pan_velocity: Vec2::ZERO, scroll_velocity: 0.0, is_dragging: false };
     }
 }
 
@@ -108,5 +108,16 @@ pub fn update_camera(
                 main_cam.pan_velocity = Vec2::ZERO;
             }
         }
+    }
+}
+
+pub struct CameraPlugin;
+
+impl Plugin for CameraPlugin
+{
+    fn build(&self, app: &mut App)
+    {
+        app.add_systems(PostStartup, setup_camera)
+            .add_systems(Update, update_camera);
     }
 }
