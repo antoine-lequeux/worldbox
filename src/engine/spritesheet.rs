@@ -14,7 +14,7 @@ pub enum SpritesheetID
 // The 'grid' parameter is the number of columns/rows in the sheet.
 pub fn register_spritesheets(mut sheets: ResMut<SpritesheetRegistry>)
 {
-    sheets.register(SpritesheetID::Terrain, "art/sprites/tileset.png", UVec2::new(2, 2));
+    sheets.register(SpritesheetID::Terrain, "art/sprites/tileset.png", UVec2::new(16, 8));
     sheets.register(SpritesheetID::House, "art/sprites/house.png", UVec2::new(1, 1));
     sheets.register(
         SpritesheetID::HumanImperialWalking,

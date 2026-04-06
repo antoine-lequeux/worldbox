@@ -30,7 +30,11 @@ pub fn setup_camera(mut commands: Commands)
             Transform::from_xyz(0.0, 0.0, -1.0),
             Pickable::default(),
         ))
-        .observe(|_: On<Pointer<DragStart>>, mut camera_query: Query<&mut MainCamera>| {
+        .observe(|event: On<Pointer<DragStart>>, mut camera_query: Query<&mut MainCamera>| {
+            if event.button == PointerButton::Primary
+            {
+                return;
+            }
             if let Ok(mut camera) = camera_query.single_mut()
             {
                 camera.is_dragging = true;
@@ -41,6 +45,10 @@ pub fn setup_camera(mut commands: Commands)
             |drag: On<Pointer<Drag>>,
              mut camera_query: Query<(&mut MainCamera, &mut Transform, &Projection)>,
              time: Res<Time>| {
+                if drag.button == PointerButton::Primary
+                {
+                    return;
+                }
                 if let Ok((mut camera, mut transform, projection)) = camera_query.single_mut()
                 {
                     if let Projection::Orthographic(ortho) = projection
@@ -55,7 +63,11 @@ pub fn setup_camera(mut commands: Commands)
                 }
             },
         )
-        .observe(|_: On<Pointer<DragEnd>>, mut camera_query: Query<&mut MainCamera>| {
+        .observe(|event: On<Pointer<DragEnd>>, mut camera_query: Query<&mut MainCamera>| {
+            if event.button == PointerButton::Primary
+            {
+                return;
+            }
             if let Ok(mut camera) = camera_query.single_mut()
             {
                 camera.is_dragging = false;

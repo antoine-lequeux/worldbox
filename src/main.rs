@@ -12,7 +12,6 @@ fn main()
         .add_plugins(TilemapPlugin)
         .add_plugins(EnginePlugin)
         .add_plugins(EntityPlugin)
-        .insert_resource(ClearColor(Color::srgb_u8(43, 140, 237)))
         .add_systems(PostStartup, setup)
         .run();
 }

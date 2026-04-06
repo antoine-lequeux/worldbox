@@ -3,6 +3,7 @@ use bevy::{
     prelude::*,
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
+use bevy_ecs_tilemap::prelude::*;
 
 use super::StandardRenderLayer;
 use crate::engine::{
@@ -81,15 +82,18 @@ fn init_macro_engine(mut commands: Commands, mut images: ResMut<Assets<Image>>)
 fn update_tile_cache(
     mut map_data: ResMut<MacroMapData>,
     tile_registry: Res<TileRegistry>,
-    tile_query: Query<(&GridPos, &TileType), Changed<TileType>>,
+    tile_query: Query<
+        (&GridPos, &TileType, &TileTextureIndex),
+        Or<(Changed<TileType>, Changed<TileTextureIndex>)>,
+    >,
 )
 {
-    for (pos, tile_type) in &tile_query
+    for (pos, tile_type, tex_index) in &tile_query
     {
         if pos.x >= 0 && pos.x < map_data.width && pos.y >= 0 && pos.y < map_data.height
         {
             let idx = ((pos.y * map_data.width) + pos.x) as usize * 4;
-            let color = tile_registry.get_color(*tile_type);
+            let color = tile_registry.get_macro_color(*tile_type, tex_index.0);
 
             map_data.tile_cache[idx .. idx + 3].copy_from_slice(&color);
             map_data.tile_cache[idx + 3] = 255;
@@ -100,6 +104,7 @@ fn update_tile_cache(
 fn paint_macro_map(
     map_data: Res<MacroMapData>,
     prop_registry: Res<PropRegistry>,
+    outline_anim: Res<crate::engine::border_outline::OutlineAnimation>,
     mut images: ResMut<Assets<Image>>,
     prop_query: Query<(&GridPos, &PropType, Option<&AnimationState>)>,
     dot_query: Query<(&GridPos, &MacroMapDot)>,
@@ -155,6 +160,27 @@ fn paint_macro_map(
             }
         }
     }
+
+    // Paint the animated border outline on top.
+    let outline_rgba = crate::engine::border_outline::OUTLINE_COLOR_RGBA;
+    let alpha = outline_rgba[3] as u16;
+    let inv_alpha = 255 - alpha;
+    if let Some(frame_tiles) = outline_anim.frames.get(outline_anim.current_frame)
+    {
+        for pos in frame_tiles
+        {
+            if pos.x >= 0 && pos.x < map_data.width && pos.y >= 0 && pos.y < map_data.height
+            {
+                let idx = ((pos.y * map_data.width) + pos.x) as usize * 4;
+                for c in 0 .. 3
+                {
+                    data[idx + c] = ((data[idx + c] as u16 * inv_alpha
+                        + outline_rgba[c] as u16 * alpha)
+                        / 255) as u8;
+                }
+            }
+        }
+    }
 }
 
 fn handle_zoom_states(
@@ -163,7 +189,7 @@ fn handle_zoom_states(
     mut next_state: ResMut<NextState<MapMode>>,
 )
 {
-    let threshold = 1.0;
+    let threshold = 1.5;
     if let Ok(Projection::Orthographic(ortho)) = camera_query.single()
     {
         if *current_state.get() == MapMode::Standard && ortho.scale > threshold

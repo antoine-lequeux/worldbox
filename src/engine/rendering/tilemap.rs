@@ -1,14 +1,28 @@
-use std::collections::HashMap;
-
 use bevy::prelude::*;
 use bevy_ecs_tilemap::prelude::*;
 
 use crate::engine::{
+    autotile::{BaseTilemap, OverlayTilemap},
     consts::{CHUNK_SIZE, MAP_HEIGHT, MAP_WIDTH, TILE_SIZE},
     coords::GridPos,
     spritesheet::{SpritesheetID, SpritesheetRegistry},
     tile::{TileRegistry, TileType},
 };
+
+#[derive(Component)]
+pub struct BorderTile;
+
+// All tile types in priority order (low -> high) for overlay layer creation.
+const ALL_TILE_TYPES: [TileType; 8] = [
+    TileType::Ocean,
+    TileType::DeepWater,
+    TileType::ShallowWater,
+    TileType::Sand,
+    TileType::PlainGrass,
+    TileType::ForestGrass,
+    TileType::Hill,
+    TileType::Mountain,
+];
 
 #[derive(Component)]
 pub struct StandardRenderLayer;
@@ -24,37 +38,31 @@ pub fn setup_chunked_map(
     let grid_size: TilemapGridSize = tile_size.into();
     let map_type = TilemapType::Square;
 
-    let tile_sheets = &[SpritesheetID::Terrain /* , SpritesheetID::Terrain2... */];
-    let mut tilemaps: HashMap<SpritesheetID, (Entity, TileStorage)> = tile_sheets
-        .iter()
-        .map(|id| (*id, (commands.spawn_empty().id(), TileStorage::empty(map_size))))
-        .collect();
+    let texture = TilemapTexture::Single(sheet_registry.images[&SpritesheetID::Terrain].clone());
+
+    let render_settings =
+        TilemapRenderSettings { render_chunk_size: UVec2::splat(CHUNK_SIZE), ..Default::default() };
+
+    // Base tilemap.
+    let base_entity = commands.spawn_empty().id();
+    let mut base_storage = TileStorage::empty(map_size);
 
     for x in 0 .. map_size.x
     {
         for y in 0 .. map_size.y
         {
-            let tile_type = match (x + y) % 4
-            {
-                0 => TileType::Grass,
-                1 => TileType::Rock,
-                2 => TileType::Dirt,
-                _ => TileType::Water,
-            };
+            let tile_type = TileType::Ocean;
+            let is_border = x == 0 || y == 0 || x == map_size.x - 1 || y == map_size.y - 1;
 
             let def = tile_registry.tiles.get(&tile_type).unwrap();
-            let sheet = sheet_registry.get(def.sheet_id).unwrap();
-            let sprite_index = sheet.sprite_index(def.sprite.x, def.sprite.y);
-
-            let (tilemap_entity, tile_storage) = tilemaps.get_mut(&def.sheet_id).unwrap();
             let tile_pos = TilePos { x, y };
 
-            let tile_entity = commands
+            let tile_id = commands
                 .spawn((
                     TileBundle {
                         position: tile_pos,
-                        tilemap_id: TilemapId(*tilemap_entity),
-                        texture_index: TileTextureIndex(sprite_index),
+                        tilemap_id: TilemapId(base_entity),
+                        texture_index: TileTextureIndex(def.blob_offset),
                         ..Default::default()
                     },
                     GridPos(IVec2 { x: x as i32, y: y as i32 }),
@@ -63,48 +71,64 @@ pub fn setup_chunked_map(
                 ))
                 .id();
 
-            tile_storage.set(&tile_pos, tile_entity);
+            if is_border
+            {
+                // Border tiles are not modifiable (to prevent overlay problems).
+                commands.entity(tile_id).insert(BorderTile);
+            }
+
+            base_storage.set(&tile_pos, tile_id);
         }
     }
 
-    for (i, sheet_id) in tile_sheets.iter().enumerate()
-    {
-        let (tilemap_entity, tile_storage) = tilemaps.remove(sheet_id).unwrap();
-        let texture = TilemapTexture::Single(sheet_registry.images[sheet_id].clone());
-
-        commands.entity(tilemap_entity).insert(TilemapBundle {
+    commands.entity(base_entity).insert((
+        TilemapBundle {
             grid_size,
             map_type,
             size: map_size,
-            storage: tile_storage,
-            texture,
+            storage: base_storage,
+            texture: texture.clone(),
             tile_size,
             anchor: TilemapAnchor::Center,
-            transform: Transform::from_xyz(0.0, 0.0, i as f32 * 0.1),
-            render_settings: TilemapRenderSettings {
-                render_chunk_size: UVec2::splat(CHUNK_SIZE),
+            transform: Transform::from_xyz(0.0, 0.0, 0.0),
+            render_settings,
+            ..Default::default()
+        },
+        BaseTilemap,
+        StandardRenderLayer,
+    ));
+
+    // One overlay tilemap per tile type, stacked by priority.
+    for &overlay_type in &ALL_TILE_TYPES
+    {
+        let priority = tile_registry
+            .tiles
+            .get(&overlay_type)
+            .map(|d| d.priority)
+            .unwrap_or(0);
+
+        let overlay_entity = commands.spawn_empty().id();
+        let overlay_storage = TileStorage::empty(map_size);
+
+        // z = 0.01 * (priority + 1) so overlays stack in priority order above the base.
+        let z = 0.01 * (priority as f32 + 1.0);
+
+        commands.entity(overlay_entity).insert((
+            TilemapBundle {
+                grid_size,
+                map_type,
+                size: map_size,
+                storage: overlay_storage,
+                texture: texture.clone(),
+                tile_size,
+                anchor: TilemapAnchor::Center,
+                transform: Transform::from_xyz(0.0, 0.0, z),
+                render_settings,
                 ..Default::default()
             },
-            ..Default::default()
-        });
-    }
-}
-
-fn sync_tile_visuals(
-    tile_registry: Res<TileRegistry>,
-    sheet_registry: Res<SpritesheetRegistry>,
-    mut tile_query: Query<(&TileType, &mut TileTextureIndex), Changed<TileType>>,
-)
-{
-    for (tile_type, mut texture_index) in &mut tile_query
-    {
-        if let Some(def) = tile_registry.tiles.get(tile_type)
-        {
-            if let Some(sheet) = sheet_registry.get(def.sheet_id)
-            {
-                texture_index.0 = sheet.sprite_index(def.sprite.x, def.sprite.y);
-            }
-        }
+            OverlayTilemap { overlay_type },
+            StandardRenderLayer,
+        ));
     }
 }
 
@@ -116,6 +140,6 @@ impl Plugin for CustomTilemapPlugin
     {
         app.init_resource::<TileRegistry>()
             .add_systems(PostStartup, setup_chunked_map)
-            .add_systems(Update, sync_tile_visuals);
+            .insert_resource(ClearColor(Color::srgb_u8(48, 104, 187)));
     }
 }
