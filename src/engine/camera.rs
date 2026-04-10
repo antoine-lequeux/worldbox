@@ -1,5 +1,11 @@
 use bevy::prelude::*;
 
+use super::consts::{CHUNK_SIZE, MAP_HEIGHT, MAP_WIDTH, TILE_SIZE};
+
+// Half-extents of the map in world-space pixels.
+const HALF_MAP_W: f32 = (MAP_WIDTH * CHUNK_SIZE * TILE_SIZE) as f32 / 2.0;
+const HALF_MAP_H: f32 = (MAP_HEIGHT * CHUNK_SIZE * TILE_SIZE) as f32 / 2.0;
+
 // State attached to the main camera for inertia-based panning and zooming.
 #[derive(Component)]
 pub struct MainCamera
@@ -63,8 +69,30 @@ pub fn setup_camera(mut commands: Commands)
                         transform.translation.x += pan_delta.x;
                         transform.translation.y += pan_delta.y;
 
+                        // Clamp to map bounds and zero velocity on clamped axes.
                         let dt = time.delta_secs().max(0.001);
-                        camera.pan_velocity = pan_delta / dt;
+                        let mut vel = pan_delta / dt;
+                        if transform.translation.x < -HALF_MAP_W
+                        {
+                            transform.translation.x = -HALF_MAP_W;
+                            vel.x = vel.x.min(0.0);
+                        }
+                        else if transform.translation.x > HALF_MAP_W
+                        {
+                            transform.translation.x = HALF_MAP_W;
+                            vel.x = vel.x.max(0.0);
+                        }
+                        if transform.translation.y < -HALF_MAP_H
+                        {
+                            transform.translation.y = -HALF_MAP_H;
+                            vel.y = vel.y.min(0.0);
+                        }
+                        else if transform.translation.y > HALF_MAP_H
+                        {
+                            transform.translation.y = HALF_MAP_H;
+                            vel.y = vel.y.max(0.0);
+                        }
+                        camera.pan_velocity = vel;
                     }
                 }
             },
@@ -82,8 +110,8 @@ pub fn setup_camera(mut commands: Commands)
         .observe(|scroll: On<Pointer<Scroll>>, mut camera_query: Query<&mut MainCamera>| {
             if let Ok(mut camera) = camera_query.single_mut()
             {
-                camera.scroll_velocity -= scroll.y * 1.5; // Multiply for sensitivity
-                camera.scroll_velocity = camera.scroll_velocity.clamp(-15.0, 15.0);
+                camera.scroll_velocity -= scroll.y * 2.0; // Multiply for sensitivity
+                camera.scroll_velocity = camera.scroll_velocity.clamp(-25.0, 25.0);
             }
         });
 }
@@ -122,6 +150,28 @@ pub fn update_camera(
             {
                 transform.translation.x += main_cam.pan_velocity.x * dt;
                 transform.translation.y += main_cam.pan_velocity.y * dt;
+
+                // Clamp to map bounds and zero velocity on clamped axes.
+                if transform.translation.x < -HALF_MAP_W
+                {
+                    transform.translation.x = -HALF_MAP_W;
+                    main_cam.pan_velocity.x = 0.0;
+                }
+                else if transform.translation.x > HALF_MAP_W
+                {
+                    transform.translation.x = HALF_MAP_W;
+                    main_cam.pan_velocity.x = 0.0;
+                }
+                if transform.translation.y < -HALF_MAP_H
+                {
+                    transform.translation.y = -HALF_MAP_H;
+                    main_cam.pan_velocity.y = 0.0;
+                }
+                else if transform.translation.y > HALF_MAP_H
+                {
+                    transform.translation.y = HALF_MAP_H;
+                    main_cam.pan_velocity.y = 0.0;
+                }
 
                 main_cam.pan_velocity *= (-3.0_f32 * dt).exp();
             }

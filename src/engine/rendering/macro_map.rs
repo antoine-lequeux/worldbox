@@ -6,7 +6,7 @@ use bevy::{
 
 use super::{
     border_outline::{OUTLINE_COLOR_RGBA, OutlineAnimation},
-    tilemap::StandardRenderLayer,
+    tilemap::{ChunkCoord, StandardRenderLayer},
 };
 use crate::engine::{
     MACRO_MAP_ZOOM_THRESHOLD,
@@ -290,8 +290,8 @@ fn hide_macro(mut q: Query<&mut Visibility, With<MacroMapSprite>>)
     }
 }
 
-// Makes all standard-mode entities visible.
-fn show_standard(mut q: Query<&mut Visibility, With<StandardRenderLayer>>)
+// Makes all standard-mode entities visible (except chunks, managed by manage_chunks).
+fn show_standard(mut q: Query<&mut Visibility, (With<StandardRenderLayer>, Without<ChunkCoord>)>)
 {
     for mut vis in &mut q
     {

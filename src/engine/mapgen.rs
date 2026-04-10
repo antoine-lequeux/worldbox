@@ -1,6 +1,12 @@
-use std::process::{Command, Stdio};
+use std::{
+    cmp::Ordering,
+    collections::{BinaryHeap, HashMap, VecDeque},
+};
 
 use bevy::prelude::*;
+use rand::{RngExt, SeedableRng};
+use rand_chacha::ChaCha8Rng;
+use rayon::prelude::*;
 
 use crate::engine::{
     consts::{CHUNK_SIZE, MAP_HEIGHT, MAP_SEED, MAP_WIDTH, NUM_CONTINENTS, PROP_Z, TILE_SIZE},
@@ -139,80 +145,898 @@ impl MapData
     }
 }
 
-// Maps a numeric tile ID from terrain.py output to a TileType.
-fn tile_type_from_id(id: u8) -> TileType
+// Min-heap node (wraps f32 cost + flat pixel index).
+#[derive(Clone, PartialEq)]
+struct He(f32, usize);
+impl Eq for He {}
+impl PartialOrd for He
 {
-    return match id
+    fn partial_cmp(&self, o: &Self) -> Option<Ordering>
     {
-        0 => TileType::Ocean,
-        1 => TileType::DeepWater,
-        2 => TileType::ShallowWater,
-        3 => TileType::Sand,
-        4 => TileType::PlainGrass,
-        5 => TileType::ForestGrass,
-        6 => TileType::Hill,
-        7 => TileType::Mountain,
-        _ => TileType::Ocean,
-    };
+        return Some(self.cmp(o));
+    }
+}
+impl Ord for He
+{
+    // Reverse so BinaryHeap becomes a min-heap.
+    fn cmp(&self, o: &Self) -> Ordering
+    {
+        return o.0.partial_cmp(&self.0).unwrap_or(Ordering::Equal);
+    }
 }
 
-// Runs terrain.py as a subprocess and parses its output into a MapData resource.
+// Catmull-Rom cubic interpolation.
+#[inline(always)]
+fn cubic(a: f32, b: f32, c: f32, d: f32, t: f32) -> f32
+{
+    return b + 0.5
+        * t
+        * (c - a + t * (2.0 * a - 5.0 * b + 4.0 * c - d + t * (3.0 * (b - c) + d - a)));
+}
+
+// Sample a float grid at fractional coordinates using bicubic interpolation.
+fn bicubic(g: &[f32], gw: usize, gh: usize, gx: f32, gy: f32) -> f32
+{
+    let ix = gx.floor() as i32;
+    let iy = gy.floor() as i32;
+    let tx = gx - ix as f32;
+    let ty = gy - iy as f32;
+
+    let cx = |v: i32| v.clamp(0, gw as i32 - 1) as usize;
+    let cy = |v: i32| v.clamp(0, gh as i32 - 1) as usize;
+
+    let mut col = [0f32; 4];
+    for j in 0i32 .. 4
+    {
+        let row = cy(iy + j - 1);
+        col[j as usize] = cubic(
+            g[row * gw + cx(ix - 1)],
+            g[row * gw + cx(ix)],
+            g[row * gw + cx(ix + 1)],
+            g[row * gw + cx(ix + 2)],
+            tx,
+        );
+    }
+    return cubic(col[0], col[1], col[2], col[3], ty);
+}
+
+// Fractal octave noise with deterministic RNG and parallel bicubic upsampling.
+fn fractal_noise(
+    w: usize,
+    h: usize,
+    base_cell: usize,
+    octaves: usize,
+    pers: f32,
+    rng: &mut ChaCha8Rng,
+) -> Vec<f32>
+{
+    let mut out = vec![0f32; w * h];
+    let mut amp = 1f32;
+    let mut max_amp = 0f32;
+
+    for oct in 0 .. octaves
+    {
+        let cell = (base_cell >> oct).max(1);
+        let gw = (w / cell).max(1);
+        let gh = (h / cell).max(1);
+
+        let mut grid = vec![0f32; gw * gh];
+        grid.iter_mut().for_each(|v| *v = rng.random::<f32>());
+
+        let (gw_f, gh_f, w_f, h_f, a) = (gw as f32, gh as f32, w as f32, h as f32, amp);
+        out.par_iter_mut().enumerate().for_each(|(i, v)| {
+            let (y, x) = (i / w, i % w);
+            let gx = x as f32 * gw_f / w_f;
+            let gy = y as f32 * gh_f / h_f;
+            *v += bicubic(&grid, gw, gh, gx, gy) * a;
+        });
+
+        max_amp += amp;
+        amp *= pers;
+    }
+
+    let inv = 1.0 / max_amp;
+    out.par_iter_mut().for_each(|v| *v *= inv);
+    return out;
+}
+
+// Separable Gaussian blur with parallel horizontal and vertical passes.
+fn gaussian_blur(src: &[f32], w: usize, h: usize, sigma: f32) -> Vec<f32>
+{
+    let r = (sigma * 3.0).ceil() as usize;
+    let ks = 2 * r + 1;
+    let inv2s2 = 1.0 / (2.0 * sigma * sigma);
+    let mut k: Vec<f32> = (0 .. ks)
+        .map(|i| {
+            let x = i as f32 - r as f32;
+            (-x * x * inv2s2).exp()
+        })
+        .collect();
+    let ks: f32 = k.iter().sum();
+    k.iter_mut().for_each(|v| *v /= ks);
+
+    let mut tmp = vec![0f32; w * h];
+    tmp.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        for x in 0 .. w
+        {
+            row[x] = k
+                .iter()
+                .enumerate()
+                .map(|(ki, &kv)| {
+                    let xx = (x as i32 + ki as i32 - r as i32).clamp(0, w as i32 - 1) as usize;
+                    src[y * w + xx] * kv
+                })
+                .sum();
+        }
+    });
+
+    let mut out = vec![0f32; w * h];
+    out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        for x in 0 .. w
+        {
+            row[x] = k
+                .iter()
+                .enumerate()
+                .map(|(ki, &kv)| {
+                    let yy = (y as i32 + ki as i32 - r as i32).clamp(0, h as i32 - 1) as usize;
+                    tmp[yy * w + x] * kv
+                })
+                .sum();
+        }
+    });
+    return out;
+}
+
+// BFS distance transform (8-connected, Chebyshev).
+fn bfs_dt(mask: &[bool], w: usize, h: usize) -> Vec<f32>
+{
+    let n = w * h;
+    let mut dist = vec![f32::MAX; n];
+    let mut q: VecDeque<usize> = VecDeque::with_capacity(n / 4);
+
+    for i in 0 .. n
+    {
+        if mask[i]
+        {
+            dist[i] = 0.0;
+            q.push_back(i);
+        }
+    }
+    while let Some(ci) = q.pop_front()
+    {
+        let d = dist[ci] + 1.0;
+        let cy = ci / w;
+        let cx = ci % w;
+        for dy in -1i32 ..= 1
+        {
+            for dx in -1i32 ..= 1
+            {
+                if dy == 0 && dx == 0
+                {
+                    continue;
+                }
+                let ny = cy as i32 + dy;
+                let nx = cx as i32 + dx;
+                if ny < 0 || ny >= h as i32 || nx < 0 || nx >= w as i32
+                {
+                    continue;
+                }
+                let ni = ny as usize * w + nx as usize;
+                if dist[ni] == f32::MAX
+                {
+                    dist[ni] = d;
+                    q.push_back(ni);
+                }
+            }
+        }
+    }
+    return dist;
+}
+
+// 8-connected component labelling.
+fn label_comp(mask: &[bool], w: usize, h: usize) -> (Vec<u32>, Vec<u32>)
+{
+    let n = w * h;
+    let mut labels = vec![0u32; n];
+    let mut sizes = vec![0u32; 1];
+    let mut lbl = 0u32;
+    let mut q: VecDeque<usize> = VecDeque::with_capacity(1 << 16);
+
+    for start in 0 .. n
+    {
+        if !mask[start] || labels[start] != 0
+        {
+            continue;
+        }
+        lbl += 1;
+        labels[start] = lbl;
+        q.push_back(start);
+        let mut sz = 0u32;
+
+        while let Some(ci) = q.pop_front()
+        {
+            sz += 1;
+            let (cy, cx) = (ci / w, ci % w);
+            for dy in -1i32 ..= 1
+            {
+                for dx in -1i32 ..= 1
+                {
+                    if dy == 0 && dx == 0
+                    {
+                        continue;
+                    }
+                    let ny = cy as i32 + dy;
+                    let nx = cx as i32 + dx;
+                    if ny < 0 || ny >= h as i32 || nx < 0 || nx >= w as i32
+                    {
+                        continue;
+                    }
+                    let ni = ny as usize * w + nx as usize;
+                    if mask[ni] && labels[ni] == 0
+                    {
+                        labels[ni] = lbl;
+                        q.push_back(ni);
+                    }
+                }
+            }
+        }
+        sizes.push(sz);
+    }
+    return (labels, sizes);
+}
+
+// A* river carving with sparse cost map. Returns Some(target_lake_label) on success.
+fn carve_river(
+    w: usize,
+    h: usize,
+    elev: &[f32],
+    wmask: &[bool],
+    is_riv: &mut [bool],
+    flow: &mut [f32],
+    lbl_w: &[u32],
+    dtw: &[f32],
+    lake_in: &mut Vec<f32>,
+    ocean_lbl: u32,
+    rng: &mut ChaCha8Rng,
+    sy: usize,
+    sx: usize,
+    rflow: f32,
+    src_lbl: Option<u32>,
+) -> Option<u32>
+{
+    let si = sy * w + sx;
+    let mut cost: HashMap<usize, f32> = HashMap::new();
+    let mut prev: HashMap<usize, usize> = HashMap::new();
+    let mut heap: BinaryHeap<He> = BinaryHeap::new();
+
+    cost.insert(si, 0.0);
+    heap.push(He(0.0, si));
+    let mut tgt = usize::MAX;
+
+    'search: while let Some(He(p, ci)) = heap.pop()
+    {
+        if p > *cost.get(&ci).unwrap_or(&f32::MAX) + 1e-5
+        {
+            continue;
+        }
+
+        if wmask[ci]
+        {
+            if let Some(sl) = src_lbl
+            {
+                if lbl_w[ci] == sl
+                {
+                    continue;
+                }
+            }
+            tgt = ci;
+            break 'search;
+        }
+
+        let (cy, cx) = (ci / w, ci % w);
+        for dy in -1i32 ..= 1
+        {
+            for dx in -1i32 ..= 1
+            {
+                if dy == 0 && dx == 0
+                {
+                    continue;
+                }
+                let ny = cy as i32 + dy;
+                let nx = cx as i32 + dx;
+                if ny < 0 || ny >= h as i32 || nx < 0 || nx >= w as i32
+                {
+                    continue;
+                }
+                let ni = ny as usize * w + nx as usize;
+
+                if let Some(sl) = src_lbl
+                {
+                    if wmask[ni] && lbl_w[ni] == sl
+                    {
+                        continue;
+                    }
+                }
+
+                let zdiff = elev[ni] - elev[ci];
+                let step = if is_riv[ni]
+                {
+                    0.1f32
+                }
+                else
+                {
+                    let base = if zdiff > 0.0 { 10.0 + zdiff * 500.0 } else { 1.0 + zdiff * 10.0 };
+                    (base + rng.random_range(0.5f32 .. 3.0)).max(0.1)
+                };
+
+                let nc = cost.get(&ci).copied().unwrap_or(0.0) + step;
+                if nc < cost.get(&ni).copied().unwrap_or(f32::MAX)
+                {
+                    cost.insert(ni, nc);
+                    prev.insert(ni, ci);
+                    heap.push(He(nc + dtw[ni] * 0.4, ni));
+                }
+            }
+        }
+    }
+
+    if tgt == usize::MAX
+    {
+        return None;
+    }
+
+    let mut path = vec![tgt];
+    let mut cur = tgt;
+    loop
+    {
+        match prev.get(&cur)
+        {
+            Some(&p) =>
+            {
+                cur = p;
+                path.push(cur);
+                if cur == si
+                {
+                    break;
+                }
+            },
+            None => break,
+        }
+    }
+    path.reverse();
+
+    for i in 0 .. path.len()
+    {
+        let pi = path[i];
+        if !wmask[pi]
+        {
+            is_riv[pi] = true;
+            flow[pi] += rflow;
+        }
+        if i + 1 < path.len()
+        {
+            let ni = path[i + 1];
+            let (ry, rx) = (pi / w, pi % w);
+            let (ny, nx) = (ni / w, ni % w);
+            if (ry as i32 - ny as i32).abs() == 1 && (rx as i32 - nx as i32).abs() == 1
+            {
+                let corner = ry * w + nx;
+                if !wmask[corner]
+                {
+                    is_riv[corner] = true;
+                    flow[corner] += rflow;
+                }
+            }
+        }
+    }
+
+    let tlbl = lbl_w[tgt];
+    if tlbl != ocean_lbl && tlbl != 0
+    {
+        if lake_in.len() <= tlbl as usize
+        {
+            lake_in.resize(tlbl as usize + 1, 0.0);
+        }
+        lake_in[tlbl as usize] += rflow;
+        return Some(tlbl);
+    }
+    return None;
+}
+
+fn percentile(data: &[f32], p: f32) -> f32
+{
+    let mut v = data.to_vec();
+    v.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+    return v[((p / 100.0 * (v.len() as f32 - 1.0)) as usize).min(v.len() - 1)];
+}
+
+fn shuffle<T>(v: &mut [T], rng: &mut ChaCha8Rng)
+{
+    for i in (1 .. v.len()).rev()
+    {
+        v.swap(i, rng.random_range(0 ..= i));
+    }
+}
+
+// Runs the full terrain generator and builds a MapData resource.
 fn generate_map() -> MapData
 {
     let width = MAP_WIDTH * CHUNK_SIZE;
     let height = MAP_HEIGHT * CHUNK_SIZE;
+    let mw = width as usize;
+    let mh = height as usize;
+    let nc = NUM_CONTINENTS as usize;
+    let n = mw * mh;
+    let mut rng = ChaCha8Rng::seed_from_u64(MAP_SEED);
 
     info!(
         "Generating world map ({}x{} tiles, {}x{} chunks, seed={})...",
         width, height, MAP_WIDTH, MAP_HEIGHT, MAP_SEED
     );
 
-    #[cfg(windows)]
-    let python = "py";
-    #[cfg(not(windows))]
-    let python = "python3";
+    // Continent centers.
+    info!("Starting landmasses from {nc} centers...");
+    let mg = 250usize;
+    let mut cont: Vec<(i64, i64)> = Vec::new();
+    let mut md: i64 = 450;
+    let mut att = 0usize;
 
-    let child = Command::new(python)
-        .arg("terrain.py")
-        .arg(MAP_SEED.to_string())
-        .arg(width.to_string())
-        .arg(height.to_string())
-        .arg(NUM_CONTINENTS.to_string())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("Failed to run terrain.py");
-
-    let output = child
-        .wait_with_output()
-        .expect("Failed to wait on terrain.py");
-
-    if !output.status.success()
+    while cont.len() < nc
     {
-        panic!("terrain.py failed with exit code {:?}", output.status.code());
-    }
-
-    let stdout = String::from_utf8(output.stdout).expect("Invalid UTF-8 from terrain.py");
-
-    let mut tiles = Vec::with_capacity((width * height) as usize);
-    for line in stdout.lines()
-    {
-        for ch in line.bytes()
+        let px = rng.random_range(mg .. (mw - mg)) as i64;
+        let py = rng.random_range(mg .. (mh - mg)) as i64;
+        if cont
+            .iter()
+            .all(|&(cy, cx)| (px - cx).pow(2) + (py - cy).pow(2) > md * md)
         {
-            if ch.is_ascii_digit()
+            cont.push((py, px));
+            att = 0;
+        }
+        else
+        {
+            att += 1;
+            if att > 50
             {
-                tiles.push(tile_type_from_id(ch - b'0'));
+                md = (md - 20).max(10);
+                att = 0;
             }
         }
     }
 
-    assert_eq!(
-        tiles.len(),
-        (width * height) as usize,
-        "Tilemap size mismatch: expected {}, got {}",
-        width * height,
-        tiles.len()
-    );
+    // Ocean ring centers.
+    info!("Forging ocean rings to quarantine continents...");
+    let mut ocean: Vec<(i64, i64)> = Vec::new();
+    for &(cy, cx) in &cont
+    {
+        for k in 0 .. 8usize
+        {
+            let angle = k as f64 * std::f64::consts::TAU / 8.0;
+            let radius = rng.random_range(300.0f64 .. 380.0);
+            let oy = (cy + (radius * angle.sin()) as i64).clamp(0, mh as i64 - 1);
+            let ox = (cx + (radius * angle.cos()) as i64).clamp(0, mw as i64 - 1);
+            ocean.push((oy, ox));
+        }
+    }
+    for _ in 0 .. 25
+    {
+        ocean.push((rng.random_range(0 .. mh) as i64, rng.random_range(0 .. mw) as i64));
+    }
+
+    let plates: Vec<(f32, f32)> = cont
+        .iter()
+        .chain(ocean.iter())
+        .map(|&(y, x)| (y as f32, x as f32))
+        .collect();
+
+    // Domain-warped Voronoi.
+    info!("Computing tectonic fault lines...");
+    let wy: Vec<f32> = fractal_noise(mw, mh, 150, 4, 0.5, &mut rng)
+        .iter()
+        .map(|&v| (v - 0.5) * 150.0)
+        .collect();
+    let wx: Vec<f32> = fractal_noise(mw, mh, 150, 4, 0.5, &mut rng)
+        .iter()
+        .map(|&v| (v - 0.5) * 150.0)
+        .collect();
+
+    let voro: Vec<(u32, u32, f32, f32)> = (0 .. n)
+        .into_par_iter()
+        .map(|i| {
+            let (y, x) = (i / mw, i % mw);
+            let (yw, xw) = (y as f32 + wy[i], x as f32 + wx[i]);
+            let (mut d1, mut d2, mut p1, mut p2) = (f32::MAX, f32::MAX, 0u32, 0u32);
+            for (pi, &(py, px)) in plates.iter().enumerate()
+            {
+                let wt = if pi < nc { 0.3 } else { 1.0 };
+                let d = ((yw - py).powi(2) + (xw - px).powi(2)) * wt;
+                if d < d1
+                {
+                    d2 = d1;
+                    p2 = p1;
+                    d1 = d;
+                    p1 = pi as u32;
+                }
+                else if d < d2
+                {
+                    d2 = d;
+                    p2 = pi as u32;
+                }
+            }
+            (p1, p2, d1.sqrt(), d2.sqrt())
+        })
+        .collect();
+
+    let closest: Vec<u32> = voro.iter().map(|r| r.0).collect();
+    let second: Vec<u32> = voro.iter().map(|r| r.1).collect();
+    let bnd: Vec<f32> = voro
+        .iter()
+        .map(|r| (1.0 - (r.3 - r.2) / 60.0).clamp(0.0, 1.0))
+        .collect();
+
+    let is_cl: Vec<bool> = closest.iter().map(|&p| p < nc as u32).collect();
+    let is_sl: Vec<bool> = second.iter().map(|&p| p < nc as u32).collect();
+
+    // Base elevation.
+    info!("Generating topography...");
+    let base_raw: Vec<f32> = is_cl.iter().map(|&l| if l { 0.55 } else { 0.10 }).collect();
+    let base_elev = gaussian_blur(&base_raw, mw, mh, 25.0);
+
+    // Tectonic feature noises.
+    let mtn_n = fractal_noise(mw, mh, 70, 5, 0.5, &mut rng);
+    let arc_n = fractal_noise(mw, mh, 30, 4, 0.5, &mut rng);
+    let crch_n = fractal_noise(mw, mh, 100, 6, 0.5, &mut rng);
+
+    // Final elevation.
+    let final_elev: Vec<f32> = (0 .. n)
+        .map(|i| {
+            let (y, x) = (i / mw, i % mw);
+
+            let ridge = (1.0 - (mtn_n[i] - 0.5).abs() * 2.0).powi(3);
+            let arc_pk = ((arc_n[i] - 0.60) * 4.0).clamp(0.0, 1.0);
+            let crunch = (crch_n[i] - 0.5) * 0.35;
+
+            let ia = if !is_cl[i] && !is_sl[i] { bnd[i] * arc_pk * 0.45 } else { 0.0 };
+            let cm = if is_cl[i] ^ is_sl[i] { bnd[i] * ridge * 0.40 } else { 0.0 };
+
+            let dx = (x as f32 / mw as f32 - 0.5).abs() * 2.0;
+            let dy = (y as f32 / mh as f32 - 0.5).abs() * 2.0;
+            let ep = (((dx * dx + dy * dy).sqrt() - 0.85) * 6.0)
+                .clamp(0.0, 1.0)
+                .powi(2)
+                * 2.0;
+
+            base_elev[i] + ia + cm + crunch - ep
+        })
+        .collect();
+
+    // Land/water thresholds.
+    const WL: f32 = 0.35;
+    info!("Enforcing 15% Mountain/Hill ratio...");
+    let land_e: Vec<f32> = final_elev.iter().filter(|&&e| e >= WL).copied().collect();
+    let (ht, mt) = if !land_e.is_empty()
+    {
+        (percentile(&land_e, 85.0), percentile(&land_e, 95.0))
+    }
+    else
+    {
+        (0.9, 1.0)
+    };
+
+    // Climate noises.
+    info!("Simulating weather patterns...");
+    let moist = fractal_noise(mw, mh, 200, 5, 0.5, &mut rng);
+    let shore_n = fractal_noise(mw, mh, 20, 4, 0.5, &mut rng);
+
+    // Distance to water + connected-component labelling.
+    let wmask: Vec<bool> = final_elev.iter().map(|&e| e < WL).collect();
+    let dtw = bfs_dt(&wmask, mw, mh);
+    let (lbl_w, wsize) = label_comp(&wmask, mw, mh);
+
+    let ocean_lbl = lbl_w[0];
+
+    let mut lbl_pix: Vec<Vec<usize>> = vec![Vec::new(); wsize.len()];
+    for (i, &l) in lbl_w.iter().enumerate()
+    {
+        if l > 0 && l != ocean_lbl && (l as usize) < lbl_pix.len()
+        {
+            lbl_pix[l as usize].push(i);
+        }
+    }
+
+    // River carving.
+    info!("Carving continental rivers...");
+    let mtn_mask: Vec<bool> = final_elev.iter().map(|&e| e >= mt).collect();
+
+    let mut hill_starts: Vec<(usize, usize)> = (0 .. n)
+        .filter(|&i| final_elev[i] >= ht && final_elev[i] < mt && dtw[i] > 30.0)
+        .map(|i| (i / mw, i % mw))
+        .collect();
+    shuffle(&mut hill_starts, &mut rng);
+
+    let mut is_riv = vec![false; n];
+    let mut flow_m = vec![0f32; n];
+    let mut lake_in = vec![0f32; wsize.len()];
+
+    info!(" - Processing Mountain Streams...");
+    let mut spawned = 0usize;
+    for &(sy, sx) in &hill_starts
+    {
+        if spawned >= 90
+        {
+            break;
+        }
+        if !is_riv[sy * mw + sx]
+        {
+            carve_river(
+                mw,
+                mh,
+                &final_elev,
+                &wmask,
+                &mut is_riv,
+                &mut flow_m,
+                &lbl_w,
+                &dtw,
+                &mut lake_in,
+                ocean_lbl,
+                &mut rng,
+                sy,
+                sx,
+                1.0,
+                None,
+            );
+            spawned += 1;
+        }
+    }
+
+    info!(" - Processing Lake Overflows...");
+    let mut oflow: VecDeque<(u32, f32)> = VecDeque::new();
+    for l in 1 .. lake_in.len()
+    {
+        if lake_in[l] > 0.0 && wsize.get(l).copied().unwrap_or(0) < 15_000
+        {
+            oflow.push_back((l as u32, lake_in[l]));
+        }
+    }
+
+    while let Some((lbl, inf)) = oflow.pop_front()
+    {
+        let mut best: Option<(usize, usize)> = None;
+        let mut low_e = f32::MAX;
+
+        if let Some(pixels) = lbl_pix.get(lbl as usize)
+        {
+            for &pi in pixels
+            {
+                let (ly, lx) = (pi / mw, pi % mw);
+                for dy in -1i32 ..= 1
+                {
+                    for dx in -1i32 ..= 1
+                    {
+                        if dy == 0 && dx == 0
+                        {
+                            continue;
+                        }
+                        let ny = ly as i32 + dy;
+                        let nx = lx as i32 + dx;
+                        if ny < 0 || ny >= mh as i32 || nx < 0 || nx >= mw as i32
+                        {
+                            continue;
+                        }
+                        let ni = ny as usize * mw + nx as usize;
+                        if !wmask[ni] && !is_riv[ni] && final_elev[ni] < low_e
+                        {
+                            low_e = final_elev[ni];
+                            best = Some((ny as usize, nx as usize));
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some((ey, ex)) = best
+        {
+            if let Some(tl) = carve_river(
+                mw,
+                mh,
+                &final_elev,
+                &wmask,
+                &mut is_riv,
+                &mut flow_m,
+                &lbl_w,
+                &dtw,
+                &mut lake_in,
+                ocean_lbl,
+                &mut rng,
+                ey,
+                ex,
+                inf,
+                Some(lbl),
+            )
+            {
+                if tl != ocean_lbl
+                {
+                    let sz = wsize.get(tl as usize).copied().unwrap_or(u32::MAX);
+                    if sz < 15_000
+                    {
+                        oflow.push_back((tl, inf));
+                    }
+                }
+            }
+        }
+    }
+
+    // River width expansion.
+    info!("Applying Flow Volumes to River Width...");
+    let mut exp_riv = vec![false; n];
+    for y in 0 .. mh
+    {
+        for x in 0 .. mw
+        {
+            let i = y * mw + x;
+            if !is_riv[i]
+            {
+                continue;
+            }
+            exp_riv[i] = true;
+            let fw = if flow_m[i] >= 10.0
+            {
+                3
+            }
+            else if flow_m[i] >= 4.0
+            {
+                2
+            }
+            else
+            {
+                1
+            };
+
+            if fw >= 2
+            {
+                for (dy, dx) in [(0i32, 1i32), (1, 0), (0, -1), (-1, 0)]
+                {
+                    let (ny, nx) = (y as i32 + dy, x as i32 + dx);
+                    if ny >= 0 && ny < mh as i32 && nx >= 0 && nx < mw as i32
+                    {
+                        exp_riv[ny as usize * mw + nx as usize] = true;
+                    }
+                }
+            }
+            if fw == 3
+            {
+                for (dy, dx) in [(1i32, 1i32), (-1, -1), (1, -1), (-1, 1)]
+                {
+                    let (ny, nx) = (y as i32 + dy, x as i32 + dx);
+                    if ny >= 0 && ny < mh as i32 && nx >= 0 && nx < mw as i32
+                    {
+                        exp_riv[ny as usize * mw + nx as usize] = true;
+                    }
+                }
+            }
+        }
+    }
+
+    // Final biome distances.
+    info!("Populating Final Biomes...");
+    let dtr = bfs_dt(&exp_riv, mw, mh);
+    let dtaw: Vec<f32> = dtw
+        .iter()
+        .zip(dtr.iter())
+        .map(|(&a, &b)| a.min(b))
+        .collect();
+    let dtm = bfs_dt(&mtn_mask, mw, mh);
+
+    // Tile assignment.
+    let mut tiles = vec![TileType::Ocean; n];
+    tiles.par_iter_mut().enumerate().for_each(|(i, t)| {
+        let (y, x) = (i / mw, i % mw);
+        let e = final_elev[i];
+        let m = moist[i];
+
+        if e < WL
+        {
+            *t = if e < WL - 0.20
+            {
+                TileType::Ocean
+            }
+            else if e < WL - 0.08
+            {
+                TileType::DeepWater
+            }
+            else
+            {
+                TileType::ShallowWater
+            };
+            return;
+        }
+        if exp_riv[i]
+        {
+            *t = TileType::ShallowWater;
+            return;
+        }
+
+        if e >= mt
+        {
+            *t = TileType::Mountain;
+            return;
+        }
+        if e >= ht
+        {
+            *t = TileType::Hill;
+            return;
+        }
+
+        if dtw[i] <= 2.0
+        {
+            let (mut bl, mut bs) = (0u32, 0u32);
+            for dy in -2i32 ..= 2
+            {
+                for dx in -2i32 ..= 2
+                {
+                    let ny = y as i32 + dy;
+                    let nx = x as i32 + dx;
+                    if ny < 0 || ny >= mh as i32 || nx < 0 || nx >= mw as i32
+                    {
+                        continue;
+                    }
+                    let nl = lbl_w[ny as usize * mw + nx as usize];
+                    if nl == 0
+                    {
+                        continue;
+                    }
+                    let ns = wsize.get(nl as usize).copied().unwrap_or(0);
+                    if ns > bs
+                    {
+                        bs = ns;
+                        bl = nl;
+                    }
+                }
+            }
+            let (sc, gc) = if bl == 0 || bl == ocean_lbl
+            {
+                (0.70f32, 0.25f32)
+            }
+            else if bs < 40
+            {
+                (0.00, 0.80)
+            }
+            else if bs < 150
+            {
+                (0.30, 0.60)
+            }
+            else
+            {
+                (0.60, 0.30)
+            };
+            let sn = shore_n[i];
+            *t = if sn < sc
+            {
+                TileType::Sand
+            }
+            else if sn < sc + gc
+            {
+                TileType::PlainGrass
+            }
+            else
+            {
+                TileType::Hill
+            };
+            return;
+        }
+
+        *t = if m < 0.22 && dtaw[i] > 25.0 && dtm[i] > 12.0
+        {
+            TileType::Sand
+        }
+        else if m > 0.55
+        {
+            TileType::ForestGrass
+        }
+        else
+        {
+            TileType::PlainGrass
+        };
+    });
 
     info!("World generation complete.");
 

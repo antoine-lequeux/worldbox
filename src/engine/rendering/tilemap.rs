@@ -6,6 +6,7 @@ use bevy::{
 
 use super::autotile;
 use crate::engine::{
+    MACRO_MAP_ZOOM_THRESHOLD,
     mapgen::MapData,
     painting::PaintSet,
     spritesheet::{AtlasLayoutState, SpritesheetID, SpritesheetRegistry},
@@ -197,14 +198,32 @@ fn build_chunk_image(
     );
 }
 
-// One-time setup: extracts tileset pixels, builds all chunk textures, and spawns chunk entities.
+// Maximum chunk textures to build per frame after initial load.
+const CHUNKS_BUILD_BUDGET: usize = 4;
+// Extra chunk margin beyond the viewport for pre-building textures.
+const LOAD_MARGIN: f32 = 3.0;
+// Chunks beyond this margin have their textures released.
+const UNLOAD_MARGIN: f32 = 6.0;
+
+// Tracks chunk texture build state for lazy loading.
+#[derive(Resource)]
+pub struct ChunkLoadState
+{
+    // Whether the initial batch of visible chunks has been built.
+    initial_load_done: bool,
+    // Per-chunk build flag, indexed by cy * chunks_x + cx.
+    built: Vec<bool>,
+    // Shared placeholder image for unbuilt chunks.
+    placeholder: Handle<Image>,
+}
+
+// One-time setup: extracts tileset pixels and spawns chunk entities with placeholder images.
 fn setup_chunks(
     mut commands: Commands,
     atlas_state: Res<AtlasLayoutState>,
     mut images: ResMut<Assets<Image>>,
     sheet_registry: Res<SpritesheetRegistry>,
     map_data: Res<MapData>,
-    tile_registry: Res<TileRegistry>,
     mut done: Local<bool>,
 )
 {
@@ -220,33 +239,158 @@ fn setup_chunks(
     let tileset_def = sheet_registry.get(SpritesheetID::Terrain).unwrap();
     let tileset = TilesetPixels::from_image(tileset_image, map_data.tile_size, tileset_def.grid.x);
 
-    info!(
-        "Building {} chunk textures ({}×{})…",
-        map_data.chunks_x * map_data.chunks_y,
-        map_data.chunks_x,
-        map_data.chunks_y,
-    );
+    let num_chunks = (map_data.chunks_x * map_data.chunks_y) as usize;
+
+    // Create a 1x1 transparent placeholder image shared by all unbuilt chunks.
+    let placeholder = images.add(Image::new(
+        Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        vec![0u8; 4],
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+    ));
 
     for cy in 0 .. map_data.chunks_y
     {
         for cx in 0 .. map_data.chunks_x
         {
-            let image = build_chunk_image(cx, cy, &map_data, &tile_registry, &tileset);
-            let handle = images.add(image);
             let origin = map_data.chunk_world_origin(cx, cy);
             let half = (map_data.chunk_size * map_data.tile_size) as f32 / 2.0;
 
             commands.spawn((
-                Sprite { image: handle, ..default() },
+                Sprite { image: placeholder.clone(), ..default() },
                 Transform::from_xyz(origin.x + half, origin.y + half, 0.0),
                 ChunkCoord { cx, cy },
                 StandardRenderLayer,
+                Visibility::Hidden,
             ));
         }
     }
 
-    info!("Chunk textures built.");
+    commands.insert_resource(ChunkLoadState {
+        initial_load_done: false,
+        built: vec![false; num_chunks],
+        placeholder,
+    });
     commands.insert_resource(tileset);
+}
+
+// Builds textures for nearby chunks and toggles visibility.
+fn manage_chunks(
+    camera_query: Query<(&Transform, &Projection), With<Camera2d>>,
+    windows: Query<&Window>,
+    map_data: Res<MapData>,
+    tile_registry: Res<TileRegistry>,
+    tileset: Res<TilesetPixels>,
+    mut load_state: ResMut<ChunkLoadState>,
+    mut images: ResMut<Assets<Image>>,
+    mut chunk_query: Query<(&ChunkCoord, &mut Visibility, &mut Sprite)>,
+)
+{
+    let Ok((cam_tf, projection)) = camera_query.single()
+    else
+    {
+        return;
+    };
+    let Projection::Orthographic(ortho) = projection
+    else
+    {
+        return;
+    };
+    let Ok(window) = windows.single()
+    else
+    {
+        return;
+    };
+
+    let in_macro = ortho.scale > MACRO_MAP_ZOOM_THRESHOLD;
+
+    let cam_pos = cam_tf.translation.xy();
+    // In macro mode, pretend we are at the zoom threshold so we pre-build
+    // the chunks that would be visible right after zooming back in.
+    let scale = if in_macro { MACRO_MAP_ZOOM_THRESHOLD } else { ortho.scale };
+    let half_w = window.resolution.width() * scale / 2.0;
+    let half_h = window.resolution.height() * scale / 2.0;
+
+    let half_map_w = (map_data.width_tiles() * map_data.tile_size) as f32 / 2.0;
+    let half_map_h = (map_data.height_tiles() * map_data.tile_size) as f32 / 2.0;
+    let chunk_px = (map_data.chunk_size * map_data.tile_size) as f32;
+
+    // Viewport bounds in chunk coordinates.
+    let view_min_x = ((cam_pos.x - half_w + half_map_w) / chunk_px)
+        .floor()
+        .max(0.0) as i32;
+    let view_max_x = ((cam_pos.x + half_w + half_map_w) / chunk_px)
+        .ceil()
+        .min(map_data.chunks_x as f32) as i32;
+    let view_min_y = ((cam_pos.y - half_h + half_map_h) / chunk_px)
+        .floor()
+        .max(0.0) as i32;
+    let view_max_y = ((cam_pos.y + half_h + half_map_h) / chunk_px)
+        .ceil()
+        .min(map_data.chunks_y as f32) as i32;
+
+    // Load range: build textures a few chunks beyond the viewport.
+    let load_min_x = (view_min_x as f32 - LOAD_MARGIN).max(0.0) as i32;
+    let load_max_x = (view_max_x as f32 + LOAD_MARGIN).min(map_data.chunks_x as f32) as i32;
+    let load_min_y = (view_min_y as f32 - LOAD_MARGIN).max(0.0) as i32;
+    let load_max_y = (view_max_y as f32 + LOAD_MARGIN).min(map_data.chunks_y as f32) as i32;
+
+    // Unload range: release textures beyond this margin.
+    let unload_min_x = (view_min_x as f32 - UNLOAD_MARGIN).max(0.0) as i32;
+    let unload_max_x = (view_max_x as f32 + UNLOAD_MARGIN).min(map_data.chunks_x as f32) as i32;
+    let unload_min_y = (view_min_y as f32 - UNLOAD_MARGIN).max(0.0) as i32;
+    let unload_max_y = (view_max_y as f32 + UNLOAD_MARGIN).min(map_data.chunks_y as f32) as i32;
+
+    // Unlimited budget for the initial load so the first frame isn't blank.
+    let budget = if load_state.initial_load_done { CHUNKS_BUILD_BUDGET } else { usize::MAX };
+    let mut built_count = 0;
+
+    for (coord, mut vis, mut sprite) in &mut chunk_query
+    {
+        let cx = coord.cx as i32;
+        let cy = coord.cy as i32;
+        let idx = (coord.cy * map_data.chunks_x + coord.cx) as usize;
+
+        let in_view = cx >= view_min_x && cx < view_max_x && cy >= view_min_y && cy < view_max_y;
+        let in_load = cx >= load_min_x && cx < load_max_x && cy >= load_min_y && cy < load_max_y;
+        let in_unload =
+            cx >= unload_min_x && cx < unload_max_x && cy >= unload_min_y && cy < unload_max_y;
+
+        // Release textures for chunks that are too far away.
+        if !in_unload && load_state.built[idx]
+        {
+            sprite.image = load_state.placeholder.clone();
+            load_state.built[idx] = false;
+        }
+
+        // Build textures for chunks in load range.
+        if in_load && !load_state.built[idx] && built_count < budget
+        {
+            let image = build_chunk_image(coord.cx, coord.cy, &map_data, &tile_registry, &tileset);
+            sprite.image = images.add(image);
+            load_state.built[idx] = true;
+            built_count += 1;
+        }
+
+        // In macro mode, don't touch visibility (hide_standard owns it).
+        if !in_macro
+        {
+            if in_view && load_state.built[idx]
+            {
+                *vis = Visibility::Inherited;
+            }
+            else
+            {
+                *vis = Visibility::Hidden;
+            }
+        }
+    }
+
+    if !load_state.initial_load_done
+    {
+        load_state.initial_load_done = true;
+    }
 }
 
 // Per-frame system: re-composites chunk textures whose tiles have been modified.
@@ -254,6 +398,7 @@ fn rebuild_dirty_chunks(
     mut map_data: ResMut<MapData>,
     tile_registry: Res<TileRegistry>,
     tileset: Res<TilesetPixels>,
+    load_state: Res<ChunkLoadState>,
     mut images: ResMut<Assets<Image>>,
     chunk_query: Query<(&ChunkCoord, &Sprite)>,
 )
@@ -276,12 +421,19 @@ fn rebuild_dirty_chunks(
         return;
     }
 
-    // Phase 2: rebuild textures in-place.
+    // Phase 2: rebuild textures in-place (skip unbuilt chunks).
     for (coord, sprite) in &chunk_query
     {
         if !dirty
             .iter()
             .any(|&(cx, cy)| cx == coord.cx && cy == coord.cy)
+        {
+            continue;
+        }
+
+        // Skip chunks whose textures haven't been built yet.
+        let idx = (coord.cy * map_data.chunks_x + coord.cx) as usize;
+        if !load_state.built[idx]
         {
             continue;
         }
@@ -306,8 +458,15 @@ impl Plugin for CustomTilemapPlugin
             .add_systems(Update, setup_chunks)
             .add_systems(
                 Update,
+                manage_chunks
+                    .run_if(resource_exists::<TilesetPixels>)
+                    .run_if(resource_exists::<ChunkLoadState>),
+            )
+            .add_systems(
+                Update,
                 rebuild_dirty_chunks
                     .run_if(resource_exists::<TilesetPixels>)
+                    .run_if(resource_exists::<ChunkLoadState>)
                     .after(PaintSet),
             )
             .insert_resource(ClearColor(Color::srgb_u8(48, 104, 187)));
