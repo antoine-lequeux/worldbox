@@ -1,10 +1,10 @@
 use bevy::prelude::*;
 
 use crate::engine::{
-    coords::{GridPos, SyncGridPos, world_to_grid},
-    prop::*,
+    coords::{GridPos, SyncGridPos},
+    mapgen::MapData,
+    prop::{*, spawn::SpawnPropExt},
     rendering::MacroMapDot,
-    spawn::SpawnPropExt,
 };
 
 #[derive(Component)]
@@ -33,12 +33,12 @@ pub fn spawn_human(commands: &mut Commands, pos: GridPos, color: [u8; 3])
     );
 }
 
-pub fn spawn_animal(commands: &mut Commands, pos: Vec2)
+pub fn spawn_animal(commands: &mut Commands, pos: Vec2, map_data: &MapData)
 {
     // Fake animal to test the macro map update.
     commands.spawn((
         Animal,
-        GridPos(world_to_grid(pos)),
+        GridPos(map_data.world_to_grid(pos)),
         Transform::from_translation(Vec3::new(pos.x, pos.y, 1.0)),
         DynamicObject,
         SyncGridPos,

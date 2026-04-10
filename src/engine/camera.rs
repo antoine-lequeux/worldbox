@@ -1,10 +1,14 @@
 use bevy::prelude::*;
 
+// State attached to the main camera for inertia-based panning and zooming.
 #[derive(Component)]
 pub struct MainCamera
 {
+    // Current panning velocity for inertia after drag ends.
     pub pan_velocity: Vec2,
+    // Current scroll-wheel zoom velocity.
     pub scroll_velocity: f32,
+    // True while the user is actively dragging the camera.
     pub is_dragging: bool,
 }
 
@@ -16,10 +20,12 @@ impl Default for MainCamera
     }
 }
 
+// Spawns the 2D camera and an invisible full-screen sprite that captures drag and scroll events.
 pub fn setup_camera(mut commands: Commands)
 {
     commands.spawn((Camera2d, MainCamera::default()));
 
+    // Invisible sprite used as a pickable surface for pointer events.
     commands
         .spawn((
             Sprite {
@@ -82,6 +88,7 @@ pub fn setup_camera(mut commands: Commands)
         });
 }
 
+// Applies zoom and pan inertia each frame.
 pub fn update_camera(
     mut camera_query: Query<(&mut Transform, &mut Projection, &mut MainCamera)>,
     time: Res<Time>,
@@ -91,6 +98,7 @@ pub fn update_camera(
     {
         let dt = time.delta_secs();
 
+        // Smooth zoom: apply scroll velocity to orthographic scale.
         if let Projection::Orthographic(ref mut ortho) = *projection
         {
             if main_cam.scroll_velocity.abs() > 0.001
@@ -98,6 +106,7 @@ pub fn update_camera(
                 ortho.scale += main_cam.scroll_velocity * dt;
                 ortho.scale = ortho.scale.clamp(0.1, 15.0);
 
+                // Exponential decay for smooth deceleration.
                 main_cam.scroll_velocity *= (-10.0_f32 * dt).exp();
             }
             else
@@ -106,6 +115,7 @@ pub fn update_camera(
             }
         }
 
+        // Pan inertia: continue sliding after the user releases the drag.
         if !main_cam.is_dragging
         {
             if main_cam.pan_velocity.length_squared() > 1.0

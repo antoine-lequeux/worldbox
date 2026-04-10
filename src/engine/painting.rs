@@ -1,14 +1,12 @@
 use bevy::prelude::*;
-use bevy_ecs_tilemap::prelude::*;
 
-use crate::engine::{
-    autotile::BaseTilemap,
-    consts::{CHUNK_SIZE, MAP_HEIGHT, MAP_WIDTH},
-    coords::world_to_grid,
-    rendering::tilemap::BorderTile,
-    tile::TileType,
-};
+use crate::engine::{mapgen::MapData, tile::TileType};
 
+// System set for paint-related systems, used as an ordering anchor.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PaintSet;
+
+// Numpad key bindings mapping keys to tile types.
 const NUMPAD_BINDINGS: [(KeyCode, TileType); 8] = [
     (KeyCode::Numpad1, TileType::Ocean),
     (KeyCode::Numpad2, TileType::DeepWater),
@@ -20,6 +18,7 @@ const NUMPAD_BINDINGS: [(KeyCode, TileType); 8] = [
     (KeyCode::Numpad8, TileType::Mountain),
 ];
 
+// Tracks the currently selected tile type for painting.
 #[derive(Resource)]
 pub struct SelectedBrush
 {
@@ -34,6 +33,7 @@ impl Default for SelectedBrush
     }
 }
 
+// Switches the active brush when a numpad key is pressed.
 fn select_brush(keyboard: Res<ButtonInput<KeyCode>>, mut brush: ResMut<SelectedBrush>)
 {
     for &(key, tile_type) in &NUMPAD_BINDINGS
@@ -45,13 +45,13 @@ fn select_brush(keyboard: Res<ButtonInput<KeyCode>>, mut brush: ResMut<SelectedB
     }
 }
 
+// Paints tiles under the cursor while the left mouse button is held.
 fn paint_tiles(
     mouse_button: Res<ButtonInput<MouseButton>>,
     brush: Res<SelectedBrush>,
     windows: Query<&Window>,
     camera_query: Query<(&Camera, &GlobalTransform), With<crate::engine::camera::MainCamera>>,
-    mut base_tilemap_query: Query<&mut TileStorage, With<BaseTilemap>>,
-    mut tile_type_query: Query<&mut TileType, Without<BorderTile>>,
+    mut map_data: ResMut<MapData>,
 )
 {
     if !mouse_button.pressed(MouseButton::Left)
@@ -80,32 +80,24 @@ fn paint_tiles(
         return;
     };
 
-    let grid = world_to_grid(world_pos);
+    let grid = map_data.world_to_grid(world_pos);
 
-    let map_w = (MAP_WIDTH * CHUNK_SIZE) as i32;
-    let map_h = (MAP_HEIGHT * CHUNK_SIZE) as i32;
+    let map_w = map_data.width_tiles() as i32;
+    let map_h = map_data.height_tiles() as i32;
     if grid.x < 0 || grid.y < 0 || grid.x >= map_w || grid.y >= map_h
     {
         return;
     }
 
-    let Ok(storage) = base_tilemap_query.single_mut()
-    else
+    // Border tiles (edge of map) are not paintable.
+    let x = grid.x as u32;
+    let y = grid.y as u32;
+    if x == 0 || y == 0 || x == map_data.width_tiles() - 1 || y == map_data.height_tiles() - 1
     {
         return;
-    };
-    let tile_pos = TilePos { x: grid.x as u32, y: grid.y as u32 };
-
-    if let Some(tile_entity) = storage.get(&tile_pos)
-    {
-        if let Ok(mut tile_type) = tile_type_query.get_mut(tile_entity)
-        {
-            if *tile_type != brush.tile_type
-            {
-                *tile_type = brush.tile_type;
-            }
-        }
     }
+
+    map_data.set_tile(x, y, brush.tile_type);
 }
 
 pub struct PaintingPlugin;
@@ -115,6 +107,6 @@ impl Plugin for PaintingPlugin
     fn build(&self, app: &mut App)
     {
         app.init_resource::<SelectedBrush>()
-            .add_systems(Update, (select_brush, paint_tiles).chain());
+            .add_systems(Update, (select_brush, paint_tiles).chain().in_set(PaintSet));
     }
 }

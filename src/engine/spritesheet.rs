@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use bevy::{asset::LoadState, prelude::*};
 
+// Known spritesheet identifiers.
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub enum SpritesheetID
 {
@@ -23,34 +24,31 @@ pub fn register_spritesheets(mut sheets: ResMut<SpritesheetRegistry>)
     );
 }
 
+// Metadata for a single spritesheet image.
 #[derive(Clone, Debug)]
 pub struct SpritesheetDef
 {
     pub path: &'static str,
-    // Number of columns/rows in the sheet.
+    // Number of columns and rows in the sheet grid.
     pub grid: UVec2,
 }
 
-impl SpritesheetDef
-{
-    #[inline]
-    pub fn sprite_index(&self, col: u32, row: u32) -> u32
-    {
-        return row * self.grid.x + col;
-    }
-}
-
+// Central store for all spritesheet definitions, loaded image handles, and atlas layouts.
 #[derive(Resource, Default)]
 pub struct SpritesheetRegistry
 {
     sheets: HashMap<SpritesheetID, SpritesheetDef>,
+    // Insertion order for deterministic iteration.
     order: Vec<SpritesheetID>,
+    // Atlas layouts built after images are loaded.
     pub layouts: HashMap<SpritesheetID, Handle<TextureAtlasLayout>>,
+    // Image asset handles, populated at startup.
     pub images: HashMap<SpritesheetID, Handle<Image>>,
 }
 
 impl SpritesheetRegistry
 {
+    // Register a spritesheet with its asset path and grid dimensions.
     pub fn register(&mut self, id: SpritesheetID, path: &'static str, grid: UVec2)
     {
         // grid = (columns, rows).
@@ -61,11 +59,13 @@ impl SpritesheetRegistry
         }
     }
 
+    // Look up a spritesheet definition by ID.
     pub fn get(&self, id: SpritesheetID) -> Option<&SpritesheetDef>
     {
         return self.sheets.get(&id);
     }
 
+    // Iterate over all registered spritesheets in insertion order.
     pub fn iter_ordered(&self) -> impl Iterator<Item = (SpritesheetID, &SpritesheetDef)>
     {
         return self
@@ -75,12 +75,14 @@ impl SpritesheetRegistry
     }
 }
 
+// Tracks whether atlas layouts have been built (gates dependent systems).
 #[derive(Resource, Default)]
 pub struct AtlasLayoutState
 {
     pub done: bool,
 }
 
+// Kicks off async loading for all registered spritesheet images.
 pub fn start_loading_sheets(
     mut sheet_registry: ResMut<SpritesheetRegistry>,
     asset_server: Res<AssetServer>,
@@ -99,6 +101,7 @@ pub fn start_loading_sheets(
     }
 }
 
+// Runs each frame until all images are loaded, then builds TextureAtlasLayouts.
 pub fn build_atlas_layouts(
     mut sheet_registry: ResMut<SpritesheetRegistry>,
     mut layout_assets: ResMut<Assets<TextureAtlasLayout>>,

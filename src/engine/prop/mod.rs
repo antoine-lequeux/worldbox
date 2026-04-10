@@ -1,9 +1,12 @@
+pub mod spawn;
+
 use std::collections::HashMap;
 
 use bevy::{asset::LoadState, prelude::*};
 
 use crate::engine::spritesheet::{SpritesheetID, SpritesheetRegistry};
 
+// Bundle inserted when spawning a prop entity.
 #[derive(Bundle)]
 pub struct PropSpriteBundle
 {
@@ -14,6 +17,7 @@ pub struct PropSpriteBundle
 
 impl PropRegistry
 {
+    // Builds a PropSpriteBundle for the given prop type, ready to spawn.
     pub fn sprite_bundle(
         &self,
         prop_type: PropType,
@@ -42,6 +46,7 @@ impl PropRegistry
     }
 }
 
+// Describes how a prop's sprite is laid out in its spritesheet.
 #[derive(Clone, Debug)]
 pub enum PropSprite
 {
@@ -61,6 +66,7 @@ pub enum PropSprite
 
 impl PropSprite
 {
+    // Returns the total number of animation frames (1 for static).
     pub fn frame_count(&self) -> usize
     {
         return match self
@@ -70,6 +76,7 @@ impl PropSprite
         };
     }
 
+    // Returns the spritesheet grid origin for the given frame index.
     pub fn frame_origin(&self, frame: usize) -> UVec2
     {
         return match self
@@ -79,6 +86,7 @@ impl PropSprite
         };
     }
 
+    // Returns the animation period in seconds, or None for static sprites.
     pub fn period(&self) -> Option<f32>
     {
         return match self
@@ -89,26 +97,23 @@ impl PropSprite
     }
 }
 
+// Full definition of a prop: spritesheet, size, animation, and macro map colors.
 #[derive(Clone, Debug)]
 pub struct PropDefinition
 {
+    // Which spritesheet this prop's sprites live in.
     pub sheet_id: SpritesheetID,
     // Size in world tiles.
     pub size_tiles: UVec2,
+    // Sprite layout (static or animated frames).
     pub sprite: PropSprite,
+    // Whether macro map colors should be sampled from the sprite image.
     pub sample_macro_colors: bool,
-    // Layout: macro_colors[frame][tile_row * tile_size.x + tile_col]
+    // Precomputed macro colors per frame per tile. Layout: [frame][row * size_tiles.x + col].
     pub macro_colors: Vec<Vec<[u8; 4]>>,
 }
 
-impl PropDefinition
-{
-    pub fn frame_count(&self) -> usize
-    {
-        return self.sprite.frame_count();
-    }
-}
-
+// Identifies the kind of prop (used as a component and registry key).
 #[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum PropType
 {
@@ -116,6 +121,7 @@ pub enum PropType
     HumanAnimation,
 }
 
+// Tracks the current animation frame and elapsed time for animated props.
 #[derive(Component, Clone, Debug, Default)]
 pub struct AnimationState
 {
@@ -123,6 +129,7 @@ pub struct AnimationState
     pub elapsed: f32,
 }
 
+// Central registry mapping each PropType to its definition.
 #[derive(Resource)]
 pub struct PropRegistry
 {
@@ -171,6 +178,7 @@ impl Default for PropRegistry
 
 impl PropRegistry
 {
+    // Returns the macro map size and color data for a prop at the given animation frame.
     pub fn get_prop_data(&self, prop_type: PropType, frame: usize) -> Option<(IVec2, &[[u8; 4]])>
     {
         let def = self.props.get(&prop_type)?;
@@ -186,12 +194,14 @@ impl PropRegistry
     }
 }
 
+// Tracks whether prop macro color sampling has been completed.
 #[derive(Resource, Default)]
 pub struct PropSamplingState
 {
     pub done: bool,
 }
 
+// Samples average pixel colors from prop sprite images to populate macro_colors.
 pub fn finish_prop_sampling(
     mut prop_registry: ResMut<PropRegistry>,
     sheet_registry: Res<SpritesheetRegistry>,
@@ -269,7 +279,7 @@ pub fn finish_prop_sampling(
     state.done = true;
 }
 
-// Average RGBA of a rectangular region in an image.
+// Computes the average RGBA color of a rectangular region in an image.
 fn sample_average(image: &Image, px: u32, py: u32, w: u32, h: u32) -> [u8; 4]
 {
     let count = (w * h) as u64;
@@ -302,6 +312,7 @@ fn sample_average(image: &Image, px: u32, py: u32, w: u32, h: u32) -> [u8; 4]
     return [(r / count) as u8, (g / count) as u8, (b / count) as u8, (a / count) as u8];
 }
 
+// Advances animation timers and updates the current frame index for all animated props.
 pub fn update_animations(
     time: Res<Time>,
     prop_registry: Res<PropRegistry>,
@@ -325,11 +336,12 @@ pub fn update_animations(
         if anim.elapsed >= period
         {
             anim.elapsed -= period;
-            anim.current_frame = (anim.current_frame + 1) % def.frame_count();
+            anim.current_frame = (anim.current_frame + 1) % def.sprite.frame_count();
         }
     }
 }
 
+// Updates each prop's Sprite atlas index when its AnimationState changes.
 pub fn sync_sprite_frame(
     prop_registry: Res<PropRegistry>,
     sheet_registry: Res<SpritesheetRegistry>,

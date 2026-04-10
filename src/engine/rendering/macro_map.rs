@@ -3,22 +3,29 @@ use bevy::{
     prelude::*,
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
-use bevy_ecs_tilemap::prelude::*;
 
-use super::StandardRenderLayer;
+use super::{
+    border_outline::{OUTLINE_COLOR_RGBA, OutlineAnimation},
+    tilemap::StandardRenderLayer,
+};
 use crate::engine::{
-    consts::{CHUNK_SIZE, MAP_HEIGHT, MAP_WIDTH, TILE_SIZE},
+    MACRO_MAP_ZOOM_THRESHOLD,
     coords::GridPos,
+    mapgen::MapData,
+    painting::PaintSet,
     prop::{AnimationState, PropRegistry, PropType},
-    tile::{TileRegistry, TileType},
+    tile::TileRegistry,
 };
 
+// Component for entities that appear as a single colored pixel on the macro map.
 #[derive(Component)]
 pub struct MacroMapDot
 {
+    // RGBA color drawn on the macro map at this entity's grid position.
     pub color: [u8; 4],
 }
 
+// State machine controlling which rendering mode is active.
 #[derive(States, Default, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum MapMode
 {
@@ -27,29 +34,55 @@ pub enum MapMode
     Macro,
 }
 
+// Holds the macro map image, a tile-color cache, and dimensions.
 #[derive(Resource)]
 pub struct MacroMapData
 {
+    // Handle to the GPU-side macro map image.
     pub handle: Handle<Image>,
+    // CPU-side RGBA pixel cache containing only tile colors (no overlays).
     pub tile_cache: Vec<u8>,
+    // Map dimensions in tiles.
     pub width: i32,
     pub height: i32,
+    // Set to true when the tile cache changes and the image needs repainting.
+    pub dirty: bool,
 }
 
+// Marker component for the macro map sprite entity.
 #[derive(Component)]
 pub struct MacroMapSprite;
 
-fn init_macro_engine(mut commands: Commands, mut images: ResMut<Assets<Image>>)
+// Initializes the macro map: builds the tile-color cache and spawns the macro map sprite.
+fn init_macro_engine(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    map_data: Res<MapData>,
+    tile_registry: Res<TileRegistry>,
+)
 {
-    let num_pixels = (MAP_WIDTH * MAP_HEIGHT * CHUNK_SIZE * CHUNK_SIZE) as usize;
-    let tile_cache = vec![0, 0, 0, 255].repeat(num_pixels);
+    let w = map_data.width_tiles();
+    let h = map_data.height_tiles();
+    let num_pixels = (w * h) as usize;
+    let mut tile_cache = vec![0u8; num_pixels * 4];
+
+    for y in 0 .. h
+    {
+        for x in 0 .. w
+        {
+            let tile_type = map_data.get_tile(x, y);
+            let def = tile_registry.tiles.get(&tile_type);
+            let color = def.map(|d| d.macro_color).unwrap_or([0, 0, 0]);
+            let idx = ((y * w) + x) as usize * 4;
+            tile_cache[idx] = color[0];
+            tile_cache[idx + 1] = color[1];
+            tile_cache[idx + 2] = color[2];
+            tile_cache[idx + 3] = 255;
+        }
+    }
 
     let image = Image::new(
-        Extent3d {
-            width: MAP_WIDTH * CHUNK_SIZE,
-            height: MAP_HEIGHT * CHUNK_SIZE,
-            depth_or_array_layers: 1,
-        },
+        Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         TextureDimension::D2,
         tile_cache.clone(),
         TextureFormat::Rgba8UnormSrgb,
@@ -57,20 +90,20 @@ fn init_macro_engine(mut commands: Commands, mut images: ResMut<Assets<Image>>)
     );
     let handle = images.add(image);
 
+    let ts = map_data.tile_size as f32;
+
     commands.insert_resource(MacroMapData {
         handle: handle.clone(),
         tile_cache,
-        width: (MAP_WIDTH * CHUNK_SIZE) as i32,
-        height: (MAP_HEIGHT * CHUNK_SIZE) as i32,
+        width: w as i32,
+        height: h as i32,
+        dirty: true,
     });
 
     commands.spawn((
         Sprite {
             image: handle,
-            custom_size: Some(Vec2::new(
-                (CHUNK_SIZE * MAP_WIDTH * TILE_SIZE) as f32,
-                (CHUNK_SIZE * MAP_HEIGHT * TILE_SIZE) as f32,
-            )),
+            custom_size: Some(Vec2::new(w as f32 * ts, h as f32 * ts)),
             ..default()
         },
         Transform::from_xyz(0.0, 0.0, 1.0).with_scale(Vec3::new(1.0, -1.0, 1.0)),
@@ -79,37 +112,65 @@ fn init_macro_engine(mut commands: Commands, mut images: ResMut<Assets<Image>>)
     ));
 }
 
+// Updates the tile-color cache for chunks whose tiles have been painted.
 fn update_tile_cache(
-    mut map_data: ResMut<MacroMapData>,
+    mut map_data: ResMut<MapData>,
+    mut macro_data: ResMut<MacroMapData>,
     tile_registry: Res<TileRegistry>,
-    tile_query: Query<
-        (&GridPos, &TileType, &TileTextureIndex),
-        Or<(Changed<TileType>, Changed<TileTextureIndex>)>,
-    >,
 )
 {
-    for (pos, tile_type, tex_index) in &tile_query
-    {
-        if pos.x >= 0 && pos.x < map_data.width && pos.y >= 0 && pos.y < map_data.height
-        {
-            let idx = ((pos.y * map_data.width) + pos.x) as usize * 4;
-            let color = tile_registry.get_macro_color(*tile_type, tex_index.0);
+    let cs = map_data.chunk_size;
 
-            map_data.tile_cache[idx .. idx + 3].copy_from_slice(&color);
-            map_data.tile_cache[idx + 3] = 255;
+    for cy in 0 .. map_data.chunks_y
+    {
+        for cx in 0 .. map_data.chunks_x
+        {
+            if !map_data.take_macro_chunk_dirty(cx, cy)
+            {
+                continue;
+            }
+
+            let x0 = cx * cs;
+            let y0 = cy * cs;
+            for ly in 0 .. cs
+            {
+                for lx in 0 .. cs
+                {
+                    let gx = x0 + lx;
+                    let gy = y0 + ly;
+                    let tile_type = map_data.get_tile(gx, gy);
+                    let color = tile_registry
+                        .tiles
+                        .get(&tile_type)
+                        .map(|d| d.macro_color)
+                        .unwrap_or([0, 0, 0]);
+                    let pixel = (gy as usize * macro_data.width as usize + gx as usize) * 4;
+                    macro_data.tile_cache[pixel] = color[0];
+                    macro_data.tile_cache[pixel + 1] = color[1];
+                    macro_data.tile_cache[pixel + 2] = color[2];
+                    macro_data.tile_cache[pixel + 3] = 255;
+                }
+            }
+            macro_data.dirty = true;
         }
     }
 }
 
+// Composites the macro map image from the tile cache, prop colors, dots, and outline.
 fn paint_macro_map(
-    map_data: Res<MacroMapData>,
+    mut map_data: ResMut<MacroMapData>,
     prop_registry: Res<PropRegistry>,
-    outline_anim: Res<crate::engine::border_outline::OutlineAnimation>,
+    outline_anim: Res<OutlineAnimation>,
     mut images: ResMut<Assets<Image>>,
     prop_query: Query<(&GridPos, &PropType, Option<&AnimationState>)>,
     dot_query: Query<(&GridPos, &MacroMapDot)>,
 )
 {
+    if !map_data.dirty && !outline_anim.is_changed()
+    {
+        return;
+    }
+    map_data.dirty = false;
     let Some(image) = images.get_mut(&map_data.handle)
     else
     {
@@ -121,8 +182,10 @@ fn paint_macro_map(
         return;
     };
 
+    // Start from the clean tile cache.
     data.copy_from_slice(&map_data.tile_cache);
 
+    // Overlay prop macro colors.
     for (pos, prop_type, anim) in &prop_query
     {
         let frame = anim.map(|a| a.current_frame).unwrap_or(0);
@@ -149,6 +212,7 @@ fn paint_macro_map(
         }
     }
 
+    // Overlay single-pixel dots (entities like humans, animals).
     for (pos, dot) in &dot_query
     {
         if pos.x >= 0 && pos.x < map_data.width && pos.y >= 0 && pos.y < map_data.height
@@ -162,7 +226,7 @@ fn paint_macro_map(
     }
 
     // Paint the animated border outline on top.
-    let outline_rgba = crate::engine::border_outline::OUTLINE_COLOR_RGBA;
+    let outline_rgba = OUTLINE_COLOR_RGBA;
     let alpha = outline_rgba[3] as u16;
     let inv_alpha = 255 - alpha;
     if let Some(frame_tiles) = outline_anim.frames.get(outline_anim.current_frame)
@@ -183,34 +247,41 @@ fn paint_macro_map(
     }
 }
 
+// Switches between Standard and Macro mode based on camera zoom level.
 fn handle_zoom_states(
     camera_query: Query<&Projection, (With<Camera2d>, Changed<Projection>)>,
     current_state: Res<State<MapMode>>,
     mut next_state: ResMut<NextState<MapMode>>,
 )
 {
-    let threshold = 1.5;
     if let Ok(Projection::Orthographic(ortho)) = camera_query.single()
     {
-        if *current_state.get() == MapMode::Standard && ortho.scale > threshold
+        if *current_state.get() == MapMode::Standard && ortho.scale > MACRO_MAP_ZOOM_THRESHOLD
         {
             next_state.set(MapMode::Macro);
         }
-        else if *current_state.get() == MapMode::Macro && ortho.scale <= threshold
+        else if *current_state.get() == MapMode::Macro && ortho.scale <= MACRO_MAP_ZOOM_THRESHOLD
         {
             next_state.set(MapMode::Standard);
         }
     }
 }
 
-fn show_macro(mut q: Query<&mut Visibility, With<MacroMapSprite>>)
+// Shows the macro map sprite and forces a repaint.
+fn show_macro(
+    mut q: Query<&mut Visibility, With<MacroMapSprite>>,
+    mut macro_data: ResMut<MacroMapData>,
+)
 {
     for mut vis in &mut q
     {
         *vis = Visibility::Visible;
     }
+    // Force a repaint on the first macro frame.
+    macro_data.dirty = true;
 }
 
+// Hides the macro map sprite.
 fn hide_macro(mut q: Query<&mut Visibility, With<MacroMapSprite>>)
 {
     for mut vis in &mut q
@@ -219,6 +290,7 @@ fn hide_macro(mut q: Query<&mut Visibility, With<MacroMapSprite>>)
     }
 }
 
+// Makes all standard-mode entities visible.
 fn show_standard(mut q: Query<&mut Visibility, With<StandardRenderLayer>>)
 {
     for mut vis in &mut q
@@ -227,6 +299,7 @@ fn show_standard(mut q: Query<&mut Visibility, With<StandardRenderLayer>>)
     }
 }
 
+// Hides all standard-mode entities.
 fn hide_standard(mut q: Query<&mut Visibility, With<StandardRenderLayer>>)
 {
     for mut vis in &mut q
@@ -246,7 +319,7 @@ impl Plugin for MacroMapPlugin
                 Startup,
                 init_macro_engine.after(crate::engine::spritesheet::build_atlas_layouts),
             )
-            .add_systems(Update, update_tile_cache)
+            .add_systems(Update, update_tile_cache.after(PaintSet))
             .add_systems(Update, handle_zoom_states)
             .add_systems(OnEnter(MapMode::Macro), (show_macro, hide_standard))
             .add_systems(OnEnter(MapMode::Standard), (show_standard, hide_macro))

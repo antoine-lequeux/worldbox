@@ -1,17 +1,21 @@
 use bevy::prelude::*;
 
+use super::{PropRegistry, PropType};
 use crate::engine::{
-    coords::{GridPos, grid_to_prop_world, sync_grid_positions},
-    prop::{PropRegistry, PropType},
+    coords::GridPos,
+    mapgen::MapData,
     rendering::StandardRenderLayer,
     spritesheet::{AtlasLayoutState, SpritesheetRegistry},
 };
 
+// Boxed closure that spawns a prop once atlas layouts are ready.
 type DeferredSpawner = Box<dyn FnOnce(&mut World) + Send + Sync>;
 
+// Queue of prop spawn operations waiting for atlas layouts to be built.
 #[derive(Resource, Default)]
 struct DeferredSpawns(Vec<DeferredSpawner>);
 
+// Command that spawns a prop entity, deferring if atlases aren't ready yet.
 struct SpawnProp<B: Bundle>
 {
     prop_type: PropType,
@@ -37,23 +41,26 @@ impl<B: Bundle> Command for SpawnProp<B>
     }
 }
 
+// Actually spawns the prop entity with its sprite bundle and world-space transform.
 fn spawn_prop_inner<B: Bundle>(world: &mut World, prop_type: PropType, pos: GridPos, extra: B)
 {
     let (bundle, world_pos) = {
         let prop_registry = world.resource::<PropRegistry>();
         let sheet_registry = world.resource::<SpritesheetRegistry>();
+        let map_data = world.resource::<MapData>();
         let size_tiles = prop_registry
             .props
             .get(&prop_type)
             .map(|d| d.size_tiles)
             .unwrap_or(UVec2::ONE);
         let bundle = prop_registry.sprite_bundle(prop_type, sheet_registry);
-        let world_pos = grid_to_prop_world(*pos, size_tiles);
+        let world_pos = map_data.grid_to_prop_world(*pos, size_tiles);
         (bundle, world_pos)
     };
     world.spawn((bundle, Transform::from_translation(world_pos), pos, StandardRenderLayer, extra));
 }
 
+// Flushes any deferred spawn operations once atlas layouts are available.
 fn flush_deferred_spawns(world: &mut World)
 {
     let spawners = std::mem::take(&mut world.resource_mut::<DeferredSpawns>().0);
@@ -63,6 +70,7 @@ fn flush_deferred_spawns(world: &mut World)
     }
 }
 
+// Extension trait for Commands to spawn props by type and grid position.
 pub trait SpawnPropExt
 {
     fn spawn_prop(&mut self, prop_type: PropType, pos: GridPos, extra: impl Bundle);
@@ -82,13 +90,11 @@ impl Plugin for SpawnPlugin
 {
     fn build(&self, app: &mut App)
     {
-        app.init_resource::<DeferredSpawns>()
-            .add_systems(
-                Update,
-                flush_deferred_spawns.run_if(|s: Res<AtlasLayoutState>, d: Res<DeferredSpawns>| {
-                    s.done && !d.0.is_empty()
-                }),
-            )
-            .add_systems(PostUpdate, sync_grid_positions);
+        app.init_resource::<DeferredSpawns>().add_systems(
+            Update,
+            flush_deferred_spawns.run_if(|s: Res<AtlasLayoutState>, d: Res<DeferredSpawns>| {
+                s.done && !d.0.is_empty()
+            }),
+        );
     }
 }
