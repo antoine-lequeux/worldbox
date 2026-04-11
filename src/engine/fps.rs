@@ -33,7 +33,7 @@ fn update_fps_counter(
     {
         if let Some(fps) = diagnostics
             .get(&bevy::diagnostic::FrameTimeDiagnosticsPlugin::FPS)
-            .and_then(|d| d.value())
+            .and_then(|d| d.smoothed())
         {
             **text = format!("FPS: {fps:.1}");
         }

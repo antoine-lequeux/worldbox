@@ -139,7 +139,7 @@ fn fill_chunk_pixels(
 )
 {
     let cs = map_data.chunk_size;
-    let ts = map_data.tile_size;
+    let ts = tileset.tile_size;
     let tex_w = cs * ts;
     let tile_x0 = cx * cs;
     let tile_y0 = cy * cs;
@@ -183,7 +183,7 @@ fn build_chunk_image(
 ) -> Image
 {
     let cs = map_data.chunk_size;
-    let ts = map_data.tile_size;
+    let ts = tileset.tile_size;
     let tex_w = cs * ts;
     let tex_h = cs * ts;
     let mut pixels = vec![0u8; (tex_w * tex_h * 4) as usize];
@@ -237,9 +237,11 @@ fn setup_chunks(
     let tileset_handle = &sheet_registry.images[&SpritesheetID::Terrain];
     let tileset_image = images.get(tileset_handle).unwrap();
     let tileset_def = sheet_registry.get(SpritesheetID::Terrain).unwrap();
-    let tileset = TilesetPixels::from_image(tileset_image, map_data.tile_size, tileset_def.grid.x);
+    let tile_tex_size = tileset_image.width() / tileset_def.grid.x;
+    let tileset = TilesetPixels::from_image(tileset_image, tile_tex_size, tileset_def.grid.x);
 
     let num_chunks = (map_data.chunks_x * map_data.chunks_y) as usize;
+    let world_chunk = (map_data.chunk_size * map_data.tile_size) as f32;
 
     // Create a 1x1 transparent placeholder image shared by all unbuilt chunks.
     let placeholder = images.add(Image::new(
@@ -258,7 +260,11 @@ fn setup_chunks(
             let half = (map_data.chunk_size * map_data.tile_size) as f32 / 2.0;
 
             commands.spawn((
-                Sprite { image: placeholder.clone(), ..default() },
+                Sprite {
+                    image: placeholder.clone(),
+                    custom_size: Some(Vec2::splat(world_chunk)),
+                    ..default()
+                },
                 Transform::from_xyz(origin.x + half, origin.y + half, 0.0),
                 ChunkCoord { cx, cy },
                 StandardRenderLayer,
