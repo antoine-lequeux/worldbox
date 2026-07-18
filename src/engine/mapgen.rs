@@ -580,19 +580,22 @@ fn generate_map() -> MapData
     // Continent centers.
     info!("Starting landmasses from {nc} centers...");
     let mg = 250usize;
-    let mut cont: Vec<(i64, i64)> = Vec::new();
-    let mut md: i64 = 450;
+    let mut centers: Vec<(f64, f64)> = Vec::new();
+    let map_area = (mw * mh) as f64;
+    let avg_area_per_center = map_area / nc as f64;
+    // Dynamic minimum distance to fit all centers, but still allow some clustering.
+    let mut md = (avg_area_per_center.sqrt() * 0.4).clamp(100.0, 600.0);
     let mut att = 0usize;
 
-    while cont.len() < nc
+    while centers.len() < nc
     {
-        let px = rng.random_range(mg .. (mw - mg)) as i64;
-        let py = rng.random_range(mg .. (mh - mg)) as i64;
-        if cont
+        let px = rng.random_range(mg as f64 .. (mw - mg) as f64);
+        let py = rng.random_range(mg as f64 .. (mh - mg) as f64);
+        if centers
             .iter()
-            .all(|&(cy, cx)| (px - cx).pow(2) + (py - cy).pow(2) > md * md)
+            .all(|&(cy, cx)| (px - cx).powi(2) + (py - cy).powi(2) > md * md)
         {
-            cont.push((py, px));
+            centers.push((py, px));
             att = 0;
         }
         else
@@ -600,27 +603,78 @@ fn generate_map() -> MapData
             att += 1;
             if att > 50
             {
-                md = (md - 20).max(10);
+                md = (md - 10.0).max(10.0);
                 att = 0;
             }
         }
     }
 
-    // Ocean ring centers.
-    info!("Forging ocean rings to quarantine continents...");
-    let mut ocean: Vec<(i64, i64)> = Vec::new();
-    for &(cy, cx) in &cont
+    // Calculate sprawl vectors to push continents toward empty spaces.
+    let mut sprawls: Vec<(f64, f64)> = vec![(0.0, 0.0); nc];
+    for i in 0 .. nc
     {
-        for k in 0 .. 8usize
+        let (cy, cx) = centers[i];
+        let mut vx = 0.0;
+        let mut vy = 0.0;
+        for j in 0 .. nc
         {
-            let angle = k as f64 * std::f64::consts::TAU / 8.0;
-            let radius = rng.random_range(300.0f64 .. 380.0);
-            let oy = (cy + (radius * angle.sin()) as i64).clamp(0, mh as i64 - 1);
-            let ox = (cx + (radius * angle.cos()) as i64).clamp(0, mw as i64 - 1);
-            ocean.push((oy, ox));
+            if i == j
+            {
+                continue;
+            }
+            let (ojy, ojx) = centers[j];
+            let dy = cy - ojy;
+            let dx = cx - ojx;
+            let dist = (dx * dx + dy * dy).sqrt().max(1.0);
+            let force = 200000.0 / dist; // Repel inversely proportional to distance
+            vx += (dx / dist) * force;
+            vy += (dy / dist) * force;
+        }
+        // Also repel from borders to push them inward if they are on the edge.
+        let border_force = 100000.0;
+        vx += border_force / cx.max(1.0) - border_force / (mw as f64 - cx).max(1.0);
+        vy += border_force / cy.max(1.0) - border_force / (mh as f64 - cy).max(1.0);
+
+        let v_len = (vx * vx + vy * vy).sqrt().max(0.001);
+        // Normalize and scale the sprawl vector by a dynamic amount.
+        let sprawl_mag = rng.random_range(0.4 .. 1.0) * md;
+        sprawls[i] = (vy / v_len * sprawl_mag, vx / v_len * sprawl_mag);
+    }
+
+    // Generate Voronoi sub-plates for continents.
+    info!("Generating continent sub-plates...");
+    let mut cont: Vec<(i64, i64)> = Vec::new();
+
+    for i in 0 .. nc
+    {
+        let (cy, cx) = centers[i];
+        let (spy, spx) = sprawls[i];
+        // The scale/complexity of the landmass
+        let num_sub_plates = rng.random_range(5 ..= 20);
+        let base_spread = rng.random_range(0.3 .. 0.6) * md;
+
+        // Push the core of the continent
+        cont.push((cy as i64, cx as i64));
+
+        for _ in 1 .. num_sub_plates
+        {
+            let offset_y = spy * rng.random_range(-0.2 .. 1.2);
+            let offset_x = spx * rng.random_range(-0.2 .. 1.2);
+            let rn_y = rng.random_range(-1.0 .. 1.0) + rng.random_range(-1.0 .. 1.0);
+            let rn_x = rng.random_range(-1.0 .. 1.0) + rng.random_range(-1.0 .. 1.0);
+            let py = (cy + offset_y + rn_y * base_spread) as i64;
+            let px = (cx + offset_x + rn_x * base_spread) as i64;
+            cont.push((py.clamp(0, mh as i64 - 1), px.clamp(0, mw as i64 - 1)));
         }
     }
-    for _ in 0 .. 25
+
+    let num_c = cont.len() as u32;
+
+    // Fill the rest with ocean plates.
+    info!("Filling remaining space with ocean plates...");
+    let mut ocean: Vec<(i64, i64)> = Vec::new();
+    let num_ocean_plates = 350; // High density to carve out oceans.
+    for _ in 0 .. num_ocean_plates
     {
         ocean.push((rng.random_range(0 .. mh) as i64, rng.random_range(0 .. mw) as i64));
     }
@@ -650,7 +704,7 @@ fn generate_map() -> MapData
             let (mut d1, mut d2, mut p1, mut p2) = (f32::MAX, f32::MAX, 0u32, 0u32);
             for (pi, &(py, px)) in plates.iter().enumerate()
             {
-                let wt = if pi < nc { 0.3 } else { 1.0 };
+                let wt = if pi < num_c as usize { 0.3 } else { 1.0 };
                 let d = ((yw - py).powi(2) + (xw - px).powi(2)) * wt;
                 if d < d1
                 {
@@ -676,8 +730,8 @@ fn generate_map() -> MapData
         .map(|r| (1.0 - (r.3 - r.2) / 60.0).clamp(0.0, 1.0))
         .collect();
 
-    let is_cl: Vec<bool> = closest.iter().map(|&p| p < nc as u32).collect();
-    let is_sl: Vec<bool> = second.iter().map(|&p| p < nc as u32).collect();
+    let is_cl: Vec<bool> = closest.iter().map(|&p| p < num_c).collect();
+    let is_sl: Vec<bool> = second.iter().map(|&p| p < num_c).collect();
 
     // Base elevation.
     info!("Generating topography...");
@@ -686,8 +740,9 @@ fn generate_map() -> MapData
 
     // Tectonic feature noises.
     let mtn_n = fractal_noise(mw, mh, 70, 5, 0.5, &mut rng);
-    let arc_n = fractal_noise(mw, mh, 30, 4, 0.5, &mut rng);
-    let crch_n = fractal_noise(mw, mh, 100, 6, 0.5, &mut rng);
+    let arc_n = fractal_noise(mw, mh, 60, 4, 0.5, &mut rng);
+    let crch_n = fractal_noise(mw, mh, 80, 6, 0.5, &mut rng);
+    let isl_n = fractal_noise(mw, mh, 250, 4, 0.5, &mut rng);
 
     // Final elevation.
     let final_elev: Vec<f32> = (0 .. n)
@@ -696,10 +751,14 @@ fn generate_map() -> MapData
 
             let ridge = (1.0 - (mtn_n[i] - 0.5).abs() * 2.0).powi(3);
             let arc_pk = ((arc_n[i] - 0.60) * 4.0).clamp(0.0, 1.0);
-            let crunch = (crch_n[i] - 0.5) * 0.35;
+            let crunch = (crch_n[i] - 0.5) * 0.15 + (isl_n[i] - 0.5) * 0.30;
 
-            let ia = if !is_cl[i] && !is_sl[i] { bnd[i] * arc_pk * 0.45 } else { 0.0 };
+            // Only allow island arcs in active tectonic zones defined by low frequency island noise
+            let active_zone = ((isl_n[i] - 0.55) * 5.0).clamp(0.0, 1.0);
+            let ia =
+                if !is_cl[i] && !is_sl[i] { bnd[i] * arc_pk * active_zone * 0.55 } else { 0.0 };
             let cm = if is_cl[i] ^ is_sl[i] { bnd[i] * ridge * 0.40 } else { 0.0 };
+            let cc = if is_cl[i] && is_sl[i] { bnd[i] * ridge * 0.55 } else { 0.0 };
 
             let dx = (x as f32 / mw as f32 - 0.5).abs() * 2.0;
             let dy = (y as f32 / mh as f32 - 0.5).abs() * 2.0;
@@ -708,7 +767,7 @@ fn generate_map() -> MapData
                 .powi(2)
                 * 2.0;
 
-            base_elev[i] + ia + cm + crunch - ep
+            base_elev[i] + ia + cm + cc + crunch - ep
         })
         .collect();
 
