@@ -15,4 +15,4 @@ pub const NUM_CONTINENTS: u32 = 20;
 // Z layer for prop sprites (above terrain, below UI).
 pub const PROP_Z: f32 = 5.0;
 // Camera zoom scale above which the macro map is shown.
-pub const MACRO_MAP_ZOOM_THRESHOLD: f32 = 1.7;
+pub const MACRO_MAP_ZOOM_THRESHOLD: f32 = 1.5;

@@ -233,14 +233,42 @@ fn paint_macro_map(
     {
         for pos in frame_tiles
         {
-            if pos.x >= 0 && pos.x < map_data.width && pos.y >= 0 && pos.y < map_data.height
+            let mut dx_in = 0;
+            let mut dy_in = 0;
+            if pos.x == 1
             {
-                let idx = ((pos.y * map_data.width) + pos.x) as usize * 4;
-                for c in 0 .. 3
+                dx_in = 1;
+            }
+            else if pos.x == map_data.width as i32 - 2
+            {
+                dx_in = -1;
+            }
+
+            if pos.y == 1
+            {
+                dy_in = 1;
+            }
+            else if pos.y == map_data.height as i32 - 2
+            {
+                dy_in = -1;
+            }
+
+            for dy in 0 ..= (if dy_in != 0 { 1 } else { 0 })
+            {
+                for dx in 0 ..= (if dx_in != 0 { 1 } else { 0 })
                 {
-                    data[idx + c] = ((data[idx + c] as u16 * inv_alpha
-                        + outline_rgba[c] as u16 * alpha)
-                        / 255) as u8;
+                    let px = pos.x + dx * dx_in;
+                    let py = pos.y + dy * dy_in;
+                    if px >= 0 && px < map_data.width && py >= 0 && py < map_data.height
+                    {
+                        let idx = ((py * map_data.width) + px) as usize * 4;
+                        for c in 0 .. 3
+                        {
+                            data[idx + c] = ((data[idx + c] as u16 * inv_alpha
+                                + outline_rgba[c] as u16 * alpha)
+                                / 255) as u8;
+                        }
+                    }
                 }
             }
         }
