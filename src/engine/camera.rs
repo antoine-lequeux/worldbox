@@ -16,13 +16,20 @@ pub struct MainCamera
     pub scroll_velocity: f32,
     // True while the user is actively dragging the camera.
     pub is_dragging: bool,
+    // The previous frame's translation, used to compute smoothed pan velocity.
+    pub last_pos: Vec2,
 }
 
 impl Default for MainCamera
 {
     fn default() -> Self
     {
-        return Self { pan_velocity: Vec2::ZERO, scroll_velocity: 0.0, is_dragging: false };
+        return Self {
+            pan_velocity: Vec2::ZERO,
+            scroll_velocity: 0.0,
+            is_dragging: false,
+            last_pos: Vec2::ZERO,
+        };
     }
 }
 
@@ -42,26 +49,28 @@ pub fn setup_camera(mut commands: Commands)
             Transform::from_xyz(0.0, 0.0, -1.0),
             Pickable::default(),
         ))
-        .observe(|event: On<Pointer<DragStart>>, mut camera_query: Query<&mut MainCamera>| {
-            if event.button == PointerButton::Primary
-            {
-                return;
-            }
-            if let Ok(mut camera) = camera_query.single_mut()
-            {
-                camera.is_dragging = true;
-                camera.pan_velocity = Vec2::ZERO;
-            }
-        })
         .observe(
-            |drag: On<Pointer<Drag>>,
-             mut camera_query: Query<(&mut MainCamera, &mut Transform, &Projection)>,
-             time: Res<Time>| {
+            |event: On<Pointer<DragStart>>,
+             mut camera_query: Query<(&mut MainCamera, &Transform)>| {
+                if event.button == PointerButton::Primary
+                {
+                    return;
+                }
+                if let Ok((mut camera, transform)) = camera_query.single_mut()
+                {
+                    camera.is_dragging = true;
+                    camera.pan_velocity = Vec2::ZERO;
+                    camera.last_pos = transform.translation.truncate();
+                }
+            },
+        )
+        .observe(
+            |drag: On<Pointer<Drag>>, mut camera_query: Query<(&mut Transform, &Projection)>| {
                 if drag.button == PointerButton::Primary
                 {
                     return;
                 }
-                if let Ok((mut camera, mut transform, projection)) = camera_query.single_mut()
+                if let Ok((mut transform, projection)) = camera_query.single_mut()
                 {
                     if let Projection::Orthographic(ortho) = projection
                     {
@@ -69,30 +78,23 @@ pub fn setup_camera(mut commands: Commands)
                         transform.translation.x += pan_delta.x;
                         transform.translation.y += pan_delta.y;
 
-                        // Clamp to map bounds and zero velocity on clamped axes.
-                        let dt = time.delta_secs().max(0.001);
-                        let mut vel = pan_delta / dt;
+                        // Clamp to map bounds.
                         if transform.translation.x < -HALF_MAP_W
                         {
                             transform.translation.x = -HALF_MAP_W;
-                            vel.x = vel.x.min(0.0);
                         }
                         else if transform.translation.x > HALF_MAP_W
                         {
                             transform.translation.x = HALF_MAP_W;
-                            vel.x = vel.x.max(0.0);
                         }
                         if transform.translation.y < -HALF_MAP_H
                         {
                             transform.translation.y = -HALF_MAP_H;
-                            vel.y = vel.y.min(0.0);
                         }
                         else if transform.translation.y > HALF_MAP_H
                         {
                             transform.translation.y = HALF_MAP_H;
-                            vel.y = vel.y.max(0.0);
                         }
-                        camera.pan_velocity = vel;
                     }
                 }
             },
@@ -132,7 +134,7 @@ pub fn update_camera(
             if main_cam.scroll_velocity.abs() > 0.001
             {
                 ortho.scale += main_cam.scroll_velocity * dt;
-                ortho.scale = ortho.scale.clamp(0.1, 15.0);
+                ortho.scale = ortho.scale.clamp(0.1, 20.0);
 
                 // Exponential decay for smooth deceleration.
                 main_cam.scroll_velocity *= (-10.0_f32 * dt).exp();
@@ -143,8 +145,18 @@ pub fn update_camera(
             }
         }
 
-        // Pan inertia: continue sliding after the user releases the drag.
-        if !main_cam.is_dragging
+        // Pan inertia: compute velocity while dragging, or continue sliding after release.
+        if main_cam.is_dragging
+        {
+            let current_pos = transform.translation.truncate();
+            let raw_vel = (current_pos - main_cam.last_pos) / dt.max(0.001);
+
+            // Smooth the velocity with an exponential moving average.
+            let smoothing = 1.0 - (-20.0_f32 * dt).exp();
+            main_cam.pan_velocity = main_cam.pan_velocity.lerp(raw_vel, smoothing);
+            main_cam.last_pos = current_pos;
+        }
+        else
         {
             if main_cam.pan_velocity.length_squared() > 1.0
             {
