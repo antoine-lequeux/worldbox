@@ -333,7 +333,7 @@ fn bfs_dt(mask: &[bool], w: usize, h: usize) -> Vec<f32>
     return dist;
 }
 
-// 8-connected component labelling.
+// 4-connected component labelling.
 fn label_comp(mask: &[bool], w: usize, h: usize) -> (Vec<u32>, Vec<u32>)
 {
     let n = w * h;
@@ -361,7 +361,7 @@ fn label_comp(mask: &[bool], w: usize, h: usize) -> (Vec<u32>, Vec<u32>)
             {
                 for dx in -1i32 ..= 1
                 {
-                    if dy == 0 && dx == 0
+                    if (dy == 0 && dx == 0) || (dy != 0 && dx != 0)
                     {
                         continue;
                     }
@@ -394,6 +394,7 @@ fn carve_river(
     is_riv: &mut [bool],
     flow: &mut [f32],
     lbl_w: &[u32],
+    wsize: &[u32],
     dtw: &[f32],
     lake_in: &mut Vec<f32>,
     ocean_lbl: u32,
@@ -410,12 +411,12 @@ fn carve_river(
     let mut heap: BinaryHeap<He> = BinaryHeap::new();
 
     cost.insert(si, 0.0);
-    heap.push(He(0.0, si));
+    heap.push(He(dtw[si] * 0.4, si));
     let mut tgt = usize::MAX;
 
     'search: while let Some(He(p, ci)) = heap.pop()
     {
-        if p > *cost.get(&ci).unwrap_or(&f32::MAX) + 1e-5
+        if p > *cost.get(&ci).unwrap_or(&f32::MAX) + dtw[ci] * 0.4 + 1e-5
         {
             continue;
         }
@@ -429,8 +430,14 @@ fn carve_river(
                     continue;
                 }
             }
-            tgt = ci;
-            break 'search;
+            // Ignore tiny puddles (like noise on the beach) so rivers reach real bodies of water
+            if lbl_w[ci] == ocean_lbl
+                || lbl_w[ci] == 0
+                || (lbl_w[ci] as usize) < wsize.len() && wsize[lbl_w[ci] as usize] > 10
+            {
+                tgt = ci;
+                break 'search;
+            }
         }
 
         let (cy, cx) = (ci / w, ci % w);
@@ -505,28 +512,24 @@ fn carve_river(
     }
     path.reverse();
 
-    for i in 0 .. path.len()
+    for i in 0 .. path.len() - 1
     {
         let pi = path[i];
-        if !wmask[pi]
+        is_riv[pi] = true;
+        flow[pi] += rflow;
+
+        let ni = path[i + 1];
+        let (ry, rx) = (pi / w, pi % w);
+        let (ny, nx) = (ni / w, ni % w);
+        if (ry as i32 - ny as i32).abs() == 1 && (rx as i32 - nx as i32).abs() == 1
         {
-            is_riv[pi] = true;
-            flow[pi] += rflow;
-        }
-        if i + 1 < path.len()
-        {
-            let ni = path[i + 1];
-            let (ry, rx) = (pi / w, pi % w);
-            let (ny, nx) = (ni / w, ni % w);
-            if (ry as i32 - ny as i32).abs() == 1 && (rx as i32 - nx as i32).abs() == 1
-            {
-                let corner = ry * w + nx;
-                if !wmask[corner]
-                {
-                    is_riv[corner] = true;
-                    flow[corner] += rflow;
-                }
-            }
+            let corner1 = ry * w + nx;
+            is_riv[corner1] = true;
+            flow[corner1] += rflow;
+
+            let corner2 = ny * w + rx;
+            is_riv[corner2] = true;
+            flow[corner2] += rflow;
         }
     }
 
@@ -748,26 +751,46 @@ fn generate_map() -> MapData
     let mtn_mask: Vec<bool> = final_elev.iter().map(|&e| e >= mt).collect();
 
     let mut hill_starts: Vec<(usize, usize)> = (0 .. n)
-        .filter(|&i| final_elev[i] >= ht && final_elev[i] < mt && dtw[i] > 30.0)
+        .filter(|&i| final_elev[i] >= ht && final_elev[i] < mt && dtw[i] > 20.0)
         .map(|i| (i / mw, i % mw))
         .collect();
     shuffle(&mut hill_starts, &mut rng);
+
+    info!(
+        "Found {} potential hill starts for rivers (dtw > 20.0, elev between ht and mt)",
+        hill_starts.len()
+    );
 
     let mut is_riv = vec![false; n];
     let mut flow_m = vec![0f32; n];
     let mut lake_in = vec![0f32; wsize.len()];
 
     info!(" - Processing Mountain Streams...");
-    let mut spawned = 0usize;
+    let mut river_sources: Vec<(usize, usize)> = Vec::new();
+    let mut carve_failures = 0usize;
     for &(sy, sx) in &hill_starts
     {
-        if spawned >= 90
+        let mut too_close = false;
+        for &(osy, osx) in &river_sources
         {
-            break;
+            let dy = sy as i32 - osy as i32;
+            let dx = sx as i32 - osx as i32;
+            if dy * dy + dx * dx < 4000
+            // roughly 63 tiles apart.
+            {
+                too_close = true;
+                break;
+            }
         }
+
+        if too_close
+        {
+            continue;
+        }
+
         if !is_riv[sy * mw + sx]
         {
-            carve_river(
+            let res = carve_river(
                 mw,
                 mh,
                 &final_elev,
@@ -775,6 +798,7 @@ fn generate_map() -> MapData
                 &mut is_riv,
                 &mut flow_m,
                 &lbl_w,
+                &wsize,
                 &dtw,
                 &mut lake_in,
                 ocean_lbl,
@@ -784,9 +808,18 @@ fn generate_map() -> MapData
                 1.0,
                 None,
             );
-            spawned += 1;
+            if res.is_none()
+            {
+                carve_failures += 1;
+            }
+            river_sources.push((sy, sx));
         }
     }
+    info!(
+        "Spawned {} rivers from mountain streams ({} carve failures).",
+        river_sources.len(),
+        carve_failures
+    );
 
     info!(" - Processing Lake Overflows...");
     let mut oflow: VecDeque<(u32, f32)> = VecDeque::new();
@@ -808,26 +841,19 @@ fn generate_map() -> MapData
             for &pi in pixels
             {
                 let (ly, lx) = (pi / mw, pi % mw);
-                for dy in -1i32 ..= 1
+                for (dy, dx) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)]
                 {
-                    for dx in -1i32 ..= 1
+                    let ny = ly as i32 + dy;
+                    let nx = lx as i32 + dx;
+                    if ny < 0 || ny >= mh as i32 || nx < 0 || nx >= mw as i32
                     {
-                        if dy == 0 && dx == 0
-                        {
-                            continue;
-                        }
-                        let ny = ly as i32 + dy;
-                        let nx = lx as i32 + dx;
-                        if ny < 0 || ny >= mh as i32 || nx < 0 || nx >= mw as i32
-                        {
-                            continue;
-                        }
-                        let ni = ny as usize * mw + nx as usize;
-                        if !wmask[ni] && !is_riv[ni] && final_elev[ni] < low_e
-                        {
-                            low_e = final_elev[ni];
-                            best = Some((ny as usize, nx as usize));
-                        }
+                        continue;
+                    }
+                    let ni = ny as usize * mw + nx as usize;
+                    if !wmask[ni] && !is_riv[ni] && final_elev[ni] < low_e
+                    {
+                        low_e = final_elev[ni];
+                        best = Some((ny as usize, nx as usize));
                     }
                 }
             }
@@ -843,6 +869,7 @@ fn generate_map() -> MapData
                 &mut is_riv,
                 &mut flow_m,
                 &lbl_w,
+                &wsize,
                 &dtw,
                 &mut lake_in,
                 ocean_lbl,
