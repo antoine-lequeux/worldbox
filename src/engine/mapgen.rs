@@ -937,6 +937,11 @@ fn generate_map() -> MapData
     let crch_n = fractal_noise(mw, mh, 80, 6, 0.5, &mut rng);
     let isl_n = fractal_noise(mw, mh, 250, 4, 0.5, &mut rng);
 
+    // Low frequency mask to break the webs into distinct ranges.
+    let mask_n = fractal_noise(mw, mh, 200, 3, 0.5, &mut rng);
+    // High frequency noise for carving thin, realistic valleys.
+    let valley_n = fractal_noise(mw, mh, 40, 5, 0.5, &mut rng);
+
     // Final elevation.
     let final_elev: Vec<f32> = (0 .. n)
         .map(|i| {
@@ -960,17 +965,31 @@ fn generate_map() -> MapData
                 .powi(2)
                 * 2.0;
 
-            base_elev[i] + ia + cm + cc + crunch - ep
+            let raw_e = base_elev[i] + ia + cm + cc + crunch - ep;
+
+            if raw_e > 0.40
+            {
+                let overage = raw_e - 0.40;
+
+                let mask = ((mask_n[i] - 0.4) * 3.0).clamp(0.0, 1.0);
+                let valley = (1.0 - (valley_n[i] - 0.5).abs() * 2.0).powi(4);
+                let mut new_overage = overage * mask;
+                new_overage = (new_overage - (valley * 0.10)).max(0.0);
+
+                return 0.40 + new_overage;
+            }
+
+            return raw_e;
         })
         .collect();
 
     // Land/water thresholds.
     const WL: f32 = 0.35;
-    info!("Enforcing 15% Mountain/Hill ratio...");
+    info!("Enforcing 8% total elevated terrain...");
     let land_e: Vec<f32> = final_elev.iter().filter(|&&e| e >= WL).copied().collect();
     let (ht, mt) = if !land_e.is_empty()
     {
-        (percentile(&land_e, 85.0), percentile(&land_e, 95.0))
+        (percentile(&land_e, 92.0), percentile(&land_e, 96.0))
     }
     else
     {
