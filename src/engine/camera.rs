@@ -181,7 +181,7 @@ pub fn update_camera(
             let diff = main_cam.target_scale - ortho.scale;
             if diff.abs() > 0.0001
             {
-                let max_speed = 25.0;
+                let max_speed = 50.0;
                 let speed = (diff.abs() * 15.0).min(max_speed);
                 let step = speed * diff.signum() * dt;
 
