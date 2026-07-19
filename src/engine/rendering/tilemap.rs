@@ -487,13 +487,18 @@ fn manage_chunks(
         // In macro mode, don't touch visibility (hide_standard owns it).
         if !in_macro
         {
-            if in_view && load_state.built[idx]
+            let target_vis = if in_view && load_state.built[idx]
             {
-                *vis = Visibility::Inherited;
+                Visibility::Inherited
             }
             else
             {
-                *vis = Visibility::Hidden;
+                Visibility::Hidden
+            };
+
+            if *vis != target_vis
+            {
+                *vis = target_vis;
             }
         }
     }

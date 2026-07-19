@@ -283,7 +283,10 @@ fn show_macro(mut q: Query<&mut Visibility, With<MacroRenderLayer>>)
 {
     for mut vis in &mut q
     {
-        *vis = Visibility::Inherited;
+        if *vis != Visibility::Inherited
+        {
+            *vis = Visibility::Inherited;
+        }
     }
 }
 
@@ -292,7 +295,10 @@ fn hide_macro(mut q: Query<&mut Visibility, With<MacroRenderLayer>>)
 {
     for mut vis in &mut q
     {
-        *vis = Visibility::Hidden;
+        if *vis != Visibility::Hidden
+        {
+            *vis = Visibility::Hidden;
+        }
     }
 }
 
@@ -327,18 +333,30 @@ fn spawn_macro_dots(
 
 // Syncs macro dot sprite transforms to their dynamic parents.
 fn sync_follow_transforms(
+    map_mode: Res<State<MapMode>>,
     parent_query: Query<&Transform, Without<FollowTransform>>,
     mut child_query: Query<(&mut Transform, &FollowTransform)>,
 )
 {
+    if *map_mode.get() != MapMode::Macro
+    {
+        return;
+    }
+
     for (mut tf, follow) in &mut child_query
     {
         if let Ok(parent_tf) = parent_query.get(follow.0)
         {
-            tf.translation.x = parent_tf.translation.x;
-            tf.translation.y = parent_tf.translation.y;
-            // Z=1.1 keeps dots on top of the Z=1.0 macro chunks.
-            tf.translation.z = 1.1;
+            let new_x = parent_tf.translation.x;
+            let new_y = parent_tf.translation.y;
+
+            if tf.translation.x != new_x || tf.translation.y != new_y
+            {
+                tf.translation.x = new_x;
+                tf.translation.y = new_y;
+                // Z=1.1 keeps dots on top of the Z=1.0 macro chunks.
+                tf.translation.z = 1.1;
+            }
         }
     }
 }
@@ -348,7 +366,10 @@ fn show_standard(mut q: Query<&mut Visibility, (With<StandardRenderLayer>, Witho
 {
     for mut vis in &mut q
     {
-        *vis = Visibility::Inherited;
+        if *vis != Visibility::Inherited
+        {
+            *vis = Visibility::Inherited;
+        }
     }
 }
 
@@ -357,7 +378,10 @@ fn hide_standard(mut q: Query<&mut Visibility, With<StandardRenderLayer>>)
 {
     for mut vis in &mut q
     {
-        *vis = Visibility::Hidden;
+        if *vis != Visibility::Hidden
+        {
+            *vis = Visibility::Hidden;
+        }
     }
 }
 
