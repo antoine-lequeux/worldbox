@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering,
-    collections::{BinaryHeap, HashMap, VecDeque},
+    collections::{BinaryHeap, VecDeque},
 };
 
 use bevy::prelude::*;
@@ -9,7 +9,7 @@ use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
 
 use crate::engine::{
-    consts::{CHUNK_SIZE, MAP_HEIGHT, MAP_SEED, MAP_WIDTH, NUM_CONTINENTS, PROP_Z, TILE_SIZE},
+    consts::{CHUNK_SIZE, LANDMASS_DENSITY, MAP_HEIGHT, MAP_SEED, MAP_WIDTH, PROP_Z, TILE_SIZE},
     tile::TileType,
 };
 
@@ -182,30 +182,59 @@ fn cubic(a: f32, b: f32, c: f32, d: f32, t: f32) -> f32
         * (c - a + t * (2.0 * a - 5.0 * b + 4.0 * c - d + t * (3.0 * (b - c) + d - a)));
 }
 
-// Sample a float grid at fractional coordinates using bicubic interpolation.
-fn bicubic(g: &[f32], gw: usize, gh: usize, gx: f32, gy: f32) -> f32
+// Separable 1D bicubic upsampling.
+fn upscale_bicubic(grid: &[f32], gw: usize, gh: usize, w: usize, h: usize) -> Vec<f32>
 {
-    let ix = gx.floor() as i32;
-    let iy = gy.floor() as i32;
-    let tx = gx - ix as f32;
-    let ty = gy - iy as f32;
+    let mut temp = vec![0f32; w * gh];
+    let gw_f = gw as f32;
+    let w_f = w as f32;
 
-    let cx = |v: i32| v.clamp(0, gw as i32 - 1) as usize;
-    let cy = |v: i32| v.clamp(0, gh as i32 - 1) as usize;
-
-    let mut col = [0f32; 4];
-    for j in 0i32 .. 4
+    let mut x_coords = Vec::with_capacity(w);
+    for x in 0 .. w
     {
-        let row = cy(iy + j - 1);
-        col[j as usize] = cubic(
-            g[row * gw + cx(ix - 1)],
-            g[row * gw + cx(ix)],
-            g[row * gw + cx(ix + 1)],
-            g[row * gw + cx(ix + 2)],
-            tx,
-        );
+        let gx = x as f32 * gw_f / w_f;
+        let ix = gx.floor() as i32;
+        let tx = gx - ix as f32;
+        x_coords.push((ix, tx));
     }
-    return cubic(col[0], col[1], col[2], col[3], ty);
+
+    temp.par_chunks_mut(w).enumerate().for_each(|(y, out_row)| {
+        let in_row = &grid[y * gw .. (y + 1) * gw];
+        let cx = |v: i32| v.clamp(0, gw as i32 - 1) as usize;
+        for x in 0 .. w
+        {
+            let (ix, tx) = x_coords[x];
+            out_row[x] = cubic(
+                in_row[cx(ix - 1)],
+                in_row[cx(ix)],
+                in_row[cx(ix + 1)],
+                in_row[cx(ix + 2)],
+                tx,
+            );
+        }
+    });
+
+    let mut out = vec![0f32; w * h];
+    let gh_f = gh as f32;
+    let h_f = h as f32;
+
+    out.par_chunks_mut(w).enumerate().for_each(|(y, out_row)| {
+        let gy = y as f32 * gh_f / h_f;
+        let iy = gy.floor() as i32;
+        let ty = gy - iy as f32;
+        let cy = |v: i32| v.clamp(0, gh as i32 - 1) as usize;
+
+        let r0 = cy(iy - 1) * w;
+        let r1 = cy(iy) * w;
+        let r2 = cy(iy + 1) * w;
+        let r3 = cy(iy + 2) * w;
+
+        for x in 0 .. w
+        {
+            out_row[x] = cubic(temp[r0 + x], temp[r1 + x], temp[r2 + x], temp[r3 + x], ty);
+        }
+    });
+    return out;
 }
 
 // Fractal octave noise with deterministic RNG and parallel bicubic upsampling.
@@ -231,12 +260,10 @@ fn fractal_noise(
         let mut grid = vec![0f32; gw * gh];
         grid.iter_mut().for_each(|v| *v = rng.random::<f32>());
 
-        let (gw_f, gh_f, w_f, h_f, a) = (gw as f32, gh as f32, w as f32, h as f32, amp);
-        out.par_iter_mut().enumerate().for_each(|(i, v)| {
-            let (y, x) = (i / w, i % w);
-            let gx = x as f32 * gw_f / w_f;
-            let gy = y as f32 * gh_f / h_f;
-            *v += bicubic(&grid, gw, gh, gx, gy) * a;
+        let upscaled = upscale_bicubic(&grid, gw, gh, w, h);
+
+        out.par_iter_mut().zip(upscaled).for_each(|(v, u)| {
+            *v += u * amp;
         });
 
         max_amp += amp;
@@ -248,96 +275,149 @@ fn fractal_noise(
     return out;
 }
 
-// Separable Gaussian blur with parallel horizontal and vertical passes.
+// Fast approximation of Gaussian Blur using 3 passes of Separable Box Blur.
 fn gaussian_blur(src: &[f32], w: usize, h: usize, sigma: f32) -> Vec<f32>
 {
-    let r = (sigma * 3.0).ceil() as usize;
-    let ks = 2 * r + 1;
-    let inv2s2 = 1.0 / (2.0 * sigma * sigma);
-    let mut k: Vec<f32> = (0 .. ks)
-        .map(|i| {
-            let x = i as f32 - r as f32;
-            (-x * x * inv2s2).exp()
-        })
-        .collect();
-    let ks: f32 = k.iter().sum();
-    k.iter_mut().for_each(|v| *v /= ks);
+    let w_ideal = (12.0 * sigma * sigma / 3.0 + 1.0).sqrt();
+    let mut r = (w_ideal.floor() as usize) / 2;
+    if r < 1
+    {
+        r = 1;
+    }
 
-    let mut tmp = vec![0f32; w * h];
-    tmp.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
-        for x in 0 .. w
-        {
-            row[x] = k
-                .iter()
-                .enumerate()
-                .map(|(ki, &kv)| {
-                    let xx = (x as i32 + ki as i32 - r as i32).clamp(0, w as i32 - 1) as usize;
-                    src[y * w + xx] * kv
-                })
-                .sum();
-        }
-    });
+    let mut current = src.to_vec();
+    let mut transposed = vec![0f32; w * h];
 
-    let mut out = vec![0f32; w * h];
-    out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
-        for x in 0 .. w
-        {
-            row[x] = k
-                .iter()
-                .enumerate()
-                .map(|(ki, &kv)| {
-                    let yy = (y as i32 + ki as i32 - r as i32).clamp(0, h as i32 - 1) as usize;
-                    tmp[yy * w + x] * kv
-                })
-                .sum();
-        }
-    });
-    return out;
+    let blur_pass = |input: &[f32], output: &mut [f32], width: usize, _height: usize| {
+        let iarr = 1.0 / (2 * r + 1) as f32;
+        output
+            .par_chunks_mut(width)
+            .enumerate()
+            .for_each(|(y, row)| {
+                let src_row = &input[y * width .. (y + 1) * width];
+                let mut sum = 0.0;
+                let first = src_row[0];
+                let last = src_row[width - 1];
+
+                for i in 0 ..= r
+                {
+                    sum += src_row[i];
+                }
+                for _ in 1 ..= r
+                {
+                    sum += first;
+                }
+
+                for x in 0 .. width
+                {
+                    row[x] = sum * iarr;
+                    let left = if x >= r { src_row[x - r] } else { first };
+                    let right = if x + r + 1 < width { src_row[x + r + 1] } else { last };
+                    sum += right - left;
+                }
+            });
+    };
+
+    let transpose = |input: &[f32], output: &mut [f32], src_w: usize, src_h: usize| {
+        output
+            .par_chunks_mut(src_h)
+            .enumerate()
+            .for_each(|(x, out_row)| {
+                for y in 0 .. src_h
+                {
+                    out_row[y] = input[y * src_w + x];
+                }
+            });
+    };
+
+    for _ in 0 .. 3
+    {
+        let mut temp_h = vec![0f32; w * h];
+        blur_pass(&current, &mut temp_h, w, h);
+
+        transpose(&temp_h, &mut transposed, w, h);
+
+        let mut temp_v = vec![0f32; w * h];
+        blur_pass(&transposed, &mut temp_v, h, w);
+
+        transpose(&temp_v, &mut current, h, w);
+    }
+
+    return current;
 }
 
-// BFS distance transform (8-connected, Chebyshev).
+// 2-pass Chamfer distance transform (Chebyshev distance).
 fn bfs_dt(mask: &[bool], w: usize, h: usize) -> Vec<f32>
 {
     let n = w * h;
     let mut dist = vec![f32::MAX; n];
-    let mut q: VecDeque<usize> = VecDeque::with_capacity(n / 4);
 
     for i in 0 .. n
     {
         if mask[i]
         {
             dist[i] = 0.0;
-            q.push_back(i);
         }
     }
-    while let Some(ci) = q.pop_front()
+
+    // Pass 1: top-left to bottom-right
+    for y in 0 .. h
     {
-        let d = dist[ci] + 1.0;
-        let cy = ci / w;
-        let cx = ci % w;
-        for dy in -1i32 ..= 1
+        for x in 0 .. w
         {
-            for dx in -1i32 ..= 1
+            let i = y * w + x;
+            let mut d = dist[i];
+
+            if y > 0
             {
-                if dy == 0 && dx == 0
+                if x > 0
                 {
-                    continue;
+                    d = d.min(dist[(y - 1) * w + (x - 1)] + 1.0);
                 }
-                let ny = cy as i32 + dy;
-                let nx = cx as i32 + dx;
-                if ny < 0 || ny >= h as i32 || nx < 0 || nx >= w as i32
+                d = d.min(dist[(y - 1) * w + x] + 1.0);
+                if x + 1 < w
                 {
-                    continue;
-                }
-                let ni = ny as usize * w + nx as usize;
-                if dist[ni] == f32::MAX
-                {
-                    dist[ni] = d;
-                    q.push_back(ni);
+                    d = d.min(dist[(y - 1) * w + (x + 1)] + 1.0);
                 }
             }
+            if x > 0
+            {
+                d = d.min(dist[y * w + (x - 1)] + 1.0);
+            }
+
+            dist[i] = d;
         }
     }
+
+    // Pass 2: bottom-right to top-left
+    for y in (0 .. h).rev()
+    {
+        for x in (0 .. w).rev()
+        {
+            let i = y * w + x;
+            let mut d = dist[i];
+
+            if y + 1 < h
+            {
+                if x > 0
+                {
+                    d = d.min(dist[(y + 1) * w + (x - 1)] + 1.0);
+                }
+                d = d.min(dist[(y + 1) * w + x] + 1.0);
+                if x + 1 < w
+                {
+                    d = d.min(dist[(y + 1) * w + (x + 1)] + 1.0);
+                }
+            }
+            if x + 1 < w
+            {
+                d = d.min(dist[y * w + (x + 1)] + 1.0);
+            }
+
+            dist[i] = d;
+        }
+    }
+
     return dist;
 }
 
@@ -393,6 +473,49 @@ fn label_comp(mask: &[bool], w: usize, h: usize) -> (Vec<u32>, Vec<u32>)
     return (labels, sizes);
 }
 
+struct AStarData
+{
+    cost: Vec<f32>,
+    prev: Vec<usize>,
+    touched: Vec<usize>,
+}
+
+impl AStarData
+{
+    fn new(n: usize) -> Self
+    {
+        return Self {
+            cost: vec![f32::MAX; n],
+            prev: vec![0; n],
+            touched: Vec::with_capacity(8192),
+        };
+    }
+
+    fn set_cost(&mut self, i: usize, c: f32, p: usize)
+    {
+        if self.cost[i] == f32::MAX
+        {
+            self.touched.push(i);
+        }
+        self.cost[i] = c;
+        self.prev[i] = p;
+    }
+
+    fn get_cost(&self, i: usize) -> f32
+    {
+        return self.cost[i];
+    }
+
+    fn clear(&mut self)
+    {
+        for &i in &self.touched
+        {
+            self.cost[i] = f32::MAX;
+        }
+        self.touched.clear();
+    }
+}
+
 // A* river carving with sparse cost map. Returns Some(target_lake_label) on success.
 fn carve_river(
     w: usize,
@@ -407,6 +530,7 @@ fn carve_river(
     lake_in: &mut Vec<f32>,
     ocean_lbl: u32,
     rng: &mut ChaCha8Rng,
+    astar: &mut AStarData,
     sy: usize,
     sx: usize,
     rflow: f32,
@@ -414,17 +538,15 @@ fn carve_river(
 ) -> Option<u32>
 {
     let si = sy * w + sx;
-    let mut cost: HashMap<usize, f32> = HashMap::new();
-    let mut prev: HashMap<usize, usize> = HashMap::new();
     let mut heap: BinaryHeap<He> = BinaryHeap::new();
 
-    cost.insert(si, 0.0);
+    astar.set_cost(si, 0.0, si);
     heap.push(He(dtw[si] * 0.4, si));
     let mut tgt = usize::MAX;
 
     'search: while let Some(He(p, ci)) = heap.pop()
     {
-        if p > *cost.get(&ci).unwrap_or(&f32::MAX) + dtw[ci] * 0.4 + 1e-5
+        if p > astar.get_cost(ci) + dtw[ci] * 0.4 + 1e-5
         {
             continue;
         }
@@ -484,11 +606,10 @@ fn carve_river(
                     (base + rng.random_range(0.5f32 .. 3.0)).max(0.1)
                 };
 
-                let nc = cost.get(&ci).copied().unwrap_or(0.0) + step;
-                if nc < cost.get(&ni).copied().unwrap_or(f32::MAX)
+                let nc = astar.get_cost(ci) + step;
+                if nc < astar.get_cost(ni)
                 {
-                    cost.insert(ni, nc);
-                    prev.insert(ni, ci);
+                    astar.set_cost(ni, nc, ci);
                     heap.push(He(nc + dtw[ni] * 0.4, ni));
                 }
             }
@@ -497,6 +618,7 @@ fn carve_river(
 
     if tgt == usize::MAX
     {
+        astar.clear();
         return None;
     }
 
@@ -504,18 +626,16 @@ fn carve_river(
     let mut cur = tgt;
     loop
     {
-        match prev.get(&cur)
+        let p = astar.prev[cur];
+        if p == cur
         {
-            Some(&p) =>
-            {
-                cur = p;
-                path.push(cur);
-                if cur == si
-                {
-                    break;
-                }
-            },
-            None => break,
+            break;
+        }
+        cur = p;
+        path.push(cur);
+        if cur == si
+        {
+            break;
         }
     }
     path.reverse();
@@ -542,6 +662,8 @@ fn carve_river(
     }
 
     let tlbl = lbl_w[tgt];
+    astar.clear();
+
     if tlbl != ocean_lbl && tlbl != 0
     {
         if lake_in.len() <= tlbl as usize
@@ -576,7 +698,7 @@ fn generate_map() -> MapData
     let height = MAP_HEIGHT * CHUNK_SIZE;
     let mw = width as usize;
     let mh = height as usize;
-    let nc = NUM_CONTINENTS as usize;
+    let nc = LANDMASS_DENSITY as usize;
     let n = mw * mh;
     let mut rng = ChaCha8Rng::seed_from_u64(MAP_SEED);
 
@@ -704,14 +826,77 @@ fn generate_map() -> MapData
         .map(|&v| (v - 0.5) * 150.0)
         .collect();
 
+    // Optimize by dividing into 64x64 chunks to filter candidate plates.
+    let chunk_size = 64usize;
+    let cx_count = (mw + chunk_size - 1) / chunk_size;
+    let cy_count = (mh + chunk_size - 1) / chunk_size;
+
+    // Max displacement is 75.0 (since noise is -0.5 to 0.5, times 150.0).
+    let max_warp = 75.0_f32;
+    // Max physical distance from center of a 64x64 chunk to any point in the chunk.
+    let chunk_radius = (chunk_size as f32 * 0.5) * 1.4142135;
+    let effective_radius = chunk_radius + max_warp;
+
+    // For each chunk, precompute candidate plates.
+    let chunk_candidates: Vec<Vec<usize>> = (0 .. cy_count * cx_count)
+        .into_par_iter()
+        .map(|ci| {
+            let cy = ci / cx_count;
+            let cx = ci % cx_count;
+            let center_y = (cy * chunk_size + chunk_size / 2) as f32;
+            let center_x = (cx * chunk_size + chunk_size / 2) as f32;
+
+            // Find 2nd closest plate to center.
+            let (mut d1, mut d2) = (f32::MAX, f32::MAX);
+            for (pi, &(py, px)) in plates.iter().enumerate()
+            {
+                let wt = if pi < num_c as usize { 0.3 } else { 1.0 };
+                let d = ((center_y - py).powi(2) + (center_x - px).powi(2)) * wt;
+                if d < d1
+                {
+                    d2 = d1;
+                    d1 = d;
+                }
+                else if d < d2
+                {
+                    d2 = d;
+                }
+            }
+
+            // Any point in chunk can be at most effective_radius away from center.
+            // Filter plates based on whether they could possibly beat d2.
+            let mut candidates = Vec::new();
+            for (pi, &(py, px)) in plates.iter().enumerate()
+            {
+                let wt = if pi < num_c as usize { 0.3 } else { 1.0 };
+                let dist_to_center = ((center_y - py).powi(2) + (center_x - px).powi(2)).sqrt();
+                let min_possible_dist = (dist_to_center - effective_radius).max(0.0);
+                let min_possible_d2 = min_possible_dist * min_possible_dist * wt;
+
+                if min_possible_d2 <= d2
+                {
+                    candidates.push(pi);
+                }
+            }
+            candidates
+        })
+        .collect();
+
     let voro: Vec<(u32, u32, f32, f32)> = (0 .. n)
         .into_par_iter()
         .map(|i| {
             let (y, x) = (i / mw, i % mw);
             let (yw, xw) = (y as f32 + wy[i], x as f32 + wx[i]);
             let (mut d1, mut d2, mut p1, mut p2) = (f32::MAX, f32::MAX, 0u32, 0u32);
-            for (pi, &(py, px)) in plates.iter().enumerate()
+
+            let cy = y / chunk_size;
+            let cx = x / chunk_size;
+            let ci = cy * cx_count + cx;
+            let candidates = &chunk_candidates[ci];
+
+            for &pi in candidates
             {
+                let (py, px) = plates[pi];
                 let wt = if pi < num_c as usize { 0.3 } else { 1.0 };
                 let d = ((yw - py).powi(2) + (xw - px).powi(2)) * wt;
                 if d < d1
@@ -835,6 +1020,8 @@ fn generate_map() -> MapData
     info!(" - Processing Mountain Streams...");
     let mut river_sources: Vec<(usize, usize)> = Vec::new();
     let mut carve_failures = 0usize;
+    let mut astar = AStarData::new(n);
+
     for &(sy, sx) in &hill_starts
     {
         let mut too_close = false;
@@ -870,6 +1057,7 @@ fn generate_map() -> MapData
                 &mut lake_in,
                 ocean_lbl,
                 &mut rng,
+                &mut astar,
                 sy,
                 sx,
                 1.0,
@@ -941,6 +1129,7 @@ fn generate_map() -> MapData
                 &mut lake_in,
                 ocean_lbl,
                 &mut rng,
+                &mut astar,
                 ey,
                 ex,
                 inf,
