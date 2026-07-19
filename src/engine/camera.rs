@@ -12,8 +12,14 @@ pub struct MainCamera
 {
     // Current panning velocity for inertia after drag ends.
     pub pan_velocity: Vec2,
-    // Current scroll-wheel zoom velocity.
-    pub scroll_velocity: f32,
+    // The target scale for the camera zoom.
+    pub target_scale: f32,
+    // The current index in the zoom_levels array.
+    pub target_zoom_level: usize,
+    // The defined list of possible zoom scales.
+    pub zoom_levels: Vec<f32>,
+    // Accumulator for scroll events to handle trackpads and normal mice.
+    pub scroll_accum: f32,
     // True while the user is actively dragging the camera.
     pub is_dragging: bool,
     // The previous frame's translation, used to compute smoothed pan velocity.
@@ -24,9 +30,35 @@ impl Default for MainCamera
 {
     fn default() -> Self
     {
+        let mut levels = vec![0.1_f32];
+        let mut current = 0.1_f32;
+        let mut offset = 0.05_f32;
+        while current < 60.0
+        {
+            current += offset;
+            levels.push(current);
+            offset *= 1.15;
+        }
+
+        // Find index closest to 1.0
+        let mut default_idx = 0;
+        let mut min_diff = f32::MAX;
+        for (i, &lvl) in levels.iter().enumerate()
+        {
+            let diff = (lvl - 1.0_f32).abs();
+            if diff < min_diff
+            {
+                min_diff = diff;
+                default_idx = i;
+            }
+        }
+
         return Self {
             pan_velocity: Vec2::ZERO,
-            scroll_velocity: 0.0,
+            target_scale: levels[default_idx],
+            target_zoom_level: default_idx,
+            zoom_levels: levels,
+            scroll_accum: 0.0,
             is_dragging: false,
             last_pos: Vec2::ZERO,
         };
@@ -112,8 +144,23 @@ pub fn setup_camera(mut commands: Commands)
         .observe(|scroll: On<Pointer<Scroll>>, mut camera_query: Query<&mut MainCamera>| {
             if let Ok(mut camera) = camera_query.single_mut()
             {
-                camera.scroll_velocity -= scroll.y * 2.0; // Multiply for sensitivity
-                camera.scroll_velocity = camera.scroll_velocity.clamp(-25.0, 25.0);
+                camera.scroll_accum -= scroll.y;
+
+                while camera.scroll_accum >= 1.0
+                {
+                    camera.target_zoom_level = camera
+                        .target_zoom_level
+                        .saturating_add(1)
+                        .min(camera.zoom_levels.len() - 1);
+                    camera.scroll_accum -= 1.0;
+                }
+                while camera.scroll_accum <= -1.0
+                {
+                    camera.target_zoom_level = camera.target_zoom_level.saturating_sub(1);
+                    camera.scroll_accum += 1.0;
+                }
+
+                camera.target_scale = camera.zoom_levels[camera.target_zoom_level];
             }
         });
 }
@@ -128,20 +175,28 @@ pub fn update_camera(
     {
         let dt = time.delta_secs();
 
-        // Smooth zoom: apply scroll velocity to orthographic scale.
+        // Interpolate orthographic scale toward the target scale.
         if let Projection::Orthographic(ref mut ortho) = *projection
         {
-            if main_cam.scroll_velocity.abs() > 0.001
+            let diff = main_cam.target_scale - ortho.scale;
+            if diff.abs() > 0.0001
             {
-                ortho.scale += main_cam.scroll_velocity * dt;
-                ortho.scale = ortho.scale.clamp(0.1, 20.0);
+                let max_speed = 25.0;
+                let speed = (diff.abs() * 15.0).min(max_speed);
+                let step = speed * diff.signum() * dt;
 
-                // Exponential decay for smooth deceleration.
-                main_cam.scroll_velocity *= (-10.0_f32 * dt).exp();
+                if step.abs() >= diff.abs()
+                {
+                    ortho.scale = main_cam.target_scale;
+                }
+                else
+                {
+                    ortho.scale += step;
+                }
             }
             else
             {
-                main_cam.scroll_velocity = 0.0;
+                ortho.scale = main_cam.target_scale;
             }
         }
 
