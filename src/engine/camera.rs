@@ -30,8 +30,8 @@ impl Default for MainCamera
 {
     fn default() -> Self
     {
-        let mut levels = vec![0.1_f32];
-        let mut current = 0.1_f32;
+        let mut levels = vec![0.15_f32];
+        let mut current = 0.15_f32;
         let mut offset = 0.05_f32;
         while current < 60.0
         {
