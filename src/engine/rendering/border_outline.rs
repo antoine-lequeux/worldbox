@@ -4,8 +4,10 @@ use bevy::{
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
 
-use super::tilemap::StandardRenderLayer;
-use crate::engine::mapgen::MapData;
+use crate::engine::{
+    mapgen::MapData,
+    rendering::{macro_map::MacroRenderLayer, tilemap::StandardRenderLayer},
+};
 
 // Period of the outline animation in seconds.
 const OUTLINE_PERIOD: f32 = 0.25;
@@ -20,7 +22,7 @@ const ALPHA: u8 = 115;
 // Outline color as RGBA bytes for macro map blending.
 pub const OUTLINE_COLOR_RGBA: [u8; 4] = [255, 255, 255, ALPHA];
 // Z layer for the outline sprites (above overlays but below props).
-const OUTLINE_Z: f32 = 0.5;
+const OUTLINE_Z: f32 = 1.5;
 
 // Builds the ordered list of tile positions along the inner perimeter of the map.
 fn build_perimeter_path(inner_x0: i32, inner_y0: i32, inner_x1: i32, inner_y1: i32) -> Vec<IVec2>
@@ -67,13 +69,19 @@ pub struct OutlineAnimation
     pub current_frame: usize,
     // Tile positions for each pre-computed frame.
     pub frames: Vec<Vec<IVec2>>,
-    // Image handles for each pre-rendered frame texture.
+    // Image handles for each pre-rendered frame texture (1 tile wide).
     pub frame_handles: Vec<Handle<Image>>,
+    // Image handles for macro mode (2 tiles wide).
+    pub macro_frame_handles: Vec<Handle<Image>>,
 }
 
-// Marker component for the outline sprite entity.
+// Marker component for the standard outline sprite entity.
 #[derive(Component)]
 struct OutlineSprite;
+
+// Marker component for the macro outline sprite entity.
+#[derive(Component)]
+struct MacroOutlineSprite;
 
 // Pre-renders all outline animation frames and spawns the outline sprite.
 fn setup_outline(mut commands: Commands, mut images: ResMut<Assets<Image>>, map_data: Res<MapData>)
@@ -93,13 +101,17 @@ fn setup_outline(mut commands: Commands, mut images: ResMut<Assets<Image>>, map_
     let h = map_h as u32;
     let mut all_frames = Vec::with_capacity(FRAME_COUNT);
     let mut frame_handles = Vec::with_capacity(FRAME_COUNT);
+    let mut macro_frame_handles = Vec::with_capacity(FRAME_COUNT);
 
     for frame_idx in 0 .. FRAME_COUNT
     {
         let tiles = compute_frame_tiles(&path, frame_idx);
 
-        // Build a transparent RGBA image with only the outline pixels set.
+        // Build a transparent RGBA image with only the outline pixels set (1-tile wide).
         let mut data = vec![0u8; (w * h * 4) as usize];
+        // Build a transparent RGBA image for macro mode (2-tiles wide).
+        let mut macro_data = vec![0u8; (w * h * 4) as usize];
+
         for pos in &tiles
         {
             let idx = ((pos.y as u32 * w) + pos.x as u32) as usize * 4;
@@ -107,6 +119,42 @@ fn setup_outline(mut commands: Commands, mut images: ResMut<Assets<Image>>, map_
             data[idx + 1] = 255;
             data[idx + 2] = 255;
             data[idx + 3] = ALPHA;
+
+            let mut dx_in = 0;
+            let mut dy_in = 0;
+            if pos.x == 1
+            {
+                dx_in = 1;
+            }
+            else if pos.x == map_w - 2
+            {
+                dx_in = -1;
+            }
+            if pos.y == 1
+            {
+                dy_in = 1;
+            }
+            else if pos.y == map_h - 2
+            {
+                dy_in = -1;
+            }
+
+            for dy in 0 ..= (if dy_in != 0 { 1 } else { 0 })
+            {
+                for dx in 0 ..= (if dx_in != 0 { 1 } else { 0 })
+                {
+                    let px = pos.x + dx * dx_in;
+                    let py = pos.y + dy * dy_in;
+                    if px >= 0 && px < map_w && py >= 0 && py < map_h
+                    {
+                        let m_idx = ((py as u32 * w) + px as u32) as usize * 4;
+                        macro_data[m_idx] = 255;
+                        macro_data[m_idx + 1] = 255;
+                        macro_data[m_idx + 2] = 255;
+                        macro_data[m_idx + 3] = ALPHA;
+                    }
+                }
+            }
         }
 
         let image = Image::new(
@@ -116,21 +164,41 @@ fn setup_outline(mut commands: Commands, mut images: ResMut<Assets<Image>>, map_
             TextureFormat::Rgba8UnormSrgb,
             RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
         );
-        let handle = images.add(image);
-        frame_handles.push(handle);
+        let macro_image = Image::new(
+            Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            TextureDimension::D2,
+            macro_data,
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+        );
+
+        frame_handles.push(images.add(image));
+        macro_frame_handles.push(images.add(macro_image));
         all_frames.push(tiles);
     }
 
-    // Single sprite entity for the outline.
+    // Single sprite entity for the standard outline.
     commands.spawn((
         Sprite {
             image: frame_handles[0].clone(),
             custom_size: Some(Vec2::new(w as f32 * ts, h as f32 * ts)),
             ..default()
         },
-        Transform::from_xyz(0.0, 0.0, OUTLINE_Z).with_scale(Vec3::new(1.0, -1.0, 1.0)),
+        Transform::from_xyz(0.0, 0.0, 0.5).with_scale(Vec3::new(1.0, -1.0, 1.0)),
         OutlineSprite,
         StandardRenderLayer,
+    ));
+
+    // Single sprite entity for the macro outline.
+    commands.spawn((
+        Sprite {
+            image: macro_frame_handles[0].clone(),
+            custom_size: Some(Vec2::new(w as f32 * ts, h as f32 * ts)),
+            ..default()
+        },
+        Transform::from_xyz(0.0, 0.0, OUTLINE_Z).with_scale(Vec3::new(1.0, -1.0, 1.0)),
+        MacroOutlineSprite,
+        MacroRenderLayer,
     ));
 
     commands.insert_resource(OutlineAnimation {
@@ -138,14 +206,16 @@ fn setup_outline(mut commands: Commands, mut images: ResMut<Assets<Image>>, map_
         current_frame: 0,
         frames: all_frames,
         frame_handles,
+        macro_frame_handles,
     });
 }
 
-// Cycles through outline frames on a timer and swaps the sprite image.
+// Cycle through outline frames on a timer and swaps the sprite images.
 fn animate_outline(
     time: Res<Time>,
     mut anim: ResMut<OutlineAnimation>,
-    mut sprites: Query<&mut Sprite, With<OutlineSprite>>,
+    mut std_sprites: Query<&mut Sprite, (With<OutlineSprite>, Without<MacroOutlineSprite>)>,
+    mut mac_sprites: Query<&mut Sprite, (With<MacroOutlineSprite>, Without<OutlineSprite>)>,
 )
 {
     anim.timer.tick(time.delta());
@@ -153,10 +223,17 @@ fn animate_outline(
     if anim.timer.just_finished()
     {
         anim.current_frame = (anim.current_frame + 1) % FRAME_COUNT;
+
         let handle = anim.frame_handles[anim.current_frame].clone();
-        for mut sprite in &mut sprites
+        for mut sprite in &mut std_sprites
         {
             sprite.image = handle.clone();
+        }
+
+        let mac_handle = anim.macro_frame_handles[anim.current_frame].clone();
+        for mut sprite in &mut mac_sprites
+        {
+            sprite.image = mac_handle.clone();
         }
     }
 }

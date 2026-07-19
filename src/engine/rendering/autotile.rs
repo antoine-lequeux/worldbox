@@ -1,11 +1,5 @@
 use crate::engine::{mapgen::MapData, tile::TileRegistry};
 
-// Bitmask values for each cardinal direction.
-const N: u8 = 1;
-const E: u8 = 2;
-const S: u8 = 4;
-const W: u8 = 8;
-
 // Tile-coordinate offsets for each cardinal direction (N, E, S, W).
 pub const CARDINAL_OFFSETS: [(i32, i32); 4] = [
     (0, 1),  // N
@@ -13,9 +7,6 @@ pub const CARDINAL_OFFSETS: [(i32, i32); 4] = [
     (0, -1), // S
     (-1, 0), // W
 ];
-
-// Bitmask for each direction index, matching CARDINAL_OFFSETS order.
-const CARDINAL_BITS: [u8; 4] = [N, E, S, W];
 
 // For a tile at (gx, gy), returns the overlay sprite index for a higher-priority
 // neighbor in the given cardinal direction. Returns None if no overlay is needed.
@@ -25,7 +16,7 @@ pub fn compute_overlay_for_dir(
     dir: usize,
     map_data: &MapData,
     tile_registry: &TileRegistry,
-) -> Option<u32>
+) -> Option<usize>
 {
     let center_type = map_data.get_tile(gx, gy);
     let center_def = tile_registry.tiles.get(&center_type)?;
@@ -60,5 +51,5 @@ pub fn compute_overlay_for_dir(
     }
 
     let foreign_def = tile_registry.tiles.get(&neighbor_type)?;
-    return Some(foreign_def.blob_offset + CARDINAL_BITS[dir] as u32);
+    return Some(foreign_def.template_idx);
 }

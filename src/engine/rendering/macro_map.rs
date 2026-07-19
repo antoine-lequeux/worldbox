@@ -4,10 +4,7 @@ use bevy::{
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
 
-use super::{
-    border_outline::{OUTLINE_COLOR_RGBA, OutlineAnimation},
-    tilemap::{ChunkCoord, StandardRenderLayer},
-};
+use super::tilemap::{ChunkCoord, StandardRenderLayer};
 use crate::engine::{
     MACRO_MAP_ZOOM_THRESHOLD,
     coords::GridPos,
@@ -25,6 +22,26 @@ pub struct MacroMapDot
     pub color: [u8; 4],
 }
 
+// Holds the texture handle for the macro dots.
+#[derive(Resource)]
+pub struct MacroDotTexture(pub Handle<Image>);
+
+// Marker for an entity that syncs its transform to another entity.
+#[derive(Component)]
+pub struct FollowTransform(pub Entity);
+
+// Marker component for entities visible only in macro map mode.
+#[derive(Component)]
+pub struct MacroRenderLayer;
+
+// Identifies which chunk a macro map sprite belongs to.
+#[derive(Component)]
+pub struct MacroMapChunk
+{
+    pub cx: u32,
+    pub cy: u32,
+}
+
 // State machine controlling which rendering mode is active.
 #[derive(States, Default, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum MapMode
@@ -34,159 +51,144 @@ pub enum MapMode
     Macro,
 }
 
-// Holds the macro map image, a tile-color cache, and dimensions.
+// Holds the GPU image handles for macro map chunks.
 #[derive(Resource)]
-pub struct MacroMapData
+pub struct MacroChunkData
 {
-    // Handle to the GPU-side macro map image.
-    pub handle: Handle<Image>,
-    // CPU-side RGBA pixel cache containing only tile colors (no overlays).
-    pub tile_cache: Vec<u8>,
-    // Map dimensions in tiles.
-    pub width: i32,
-    pub height: i32,
-    // Set to true when the tile cache changes and the image needs repainting.
-    pub dirty: bool,
+    // Indexed by cy * chunks_x + cx
+    pub chunk_handles: Vec<Handle<Image>>,
 }
 
-// Marker component for the macro map sprite entity.
-#[derive(Component)]
-pub struct MacroMapSprite;
-
-// Initializes the macro map: builds the tile-color cache and spawns the macro map sprite.
+// Initializes the macro map: spawns chunk entities with placeholder textures.
 fn init_macro_engine(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
     map_data: Res<MapData>,
     tile_registry: Res<TileRegistry>,
-)
-{
-    let w = map_data.width_tiles();
-    let h = map_data.height_tiles();
-    let num_pixels = (w * h) as usize;
-    let mut tile_cache = vec![0u8; num_pixels * 4];
-
-    for y in 0 .. h
-    {
-        for x in 0 .. w
-        {
-            let tile_type = map_data.get_tile(x, y);
-            let def = tile_registry.tiles.get(&tile_type);
-            let color = def.map(|d| d.macro_color).unwrap_or([0, 0, 0]);
-            let idx = ((y * w) + x) as usize * 4;
-            tile_cache[idx] = color[0];
-            tile_cache[idx + 1] = color[1];
-            tile_cache[idx + 2] = color[2];
-            tile_cache[idx + 3] = 255;
-        }
-    }
-
-    let image = Image::new(
-        Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-        TextureDimension::D2,
-        tile_cache.clone(),
-        TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
-    );
-    let handle = images.add(image);
-
-    let ts = map_data.tile_size as f32;
-
-    commands.insert_resource(MacroMapData {
-        handle: handle.clone(),
-        tile_cache,
-        width: w as i32,
-        height: h as i32,
-        dirty: true,
-    });
-
-    commands.spawn((
-        Sprite {
-            image: handle,
-            custom_size: Some(Vec2::new(w as f32 * ts, h as f32 * ts)),
-            ..default()
-        },
-        Transform::from_xyz(0.0, 0.0, 1.0).with_scale(Vec3::new(1.0, -1.0, 1.0)),
-        Visibility::Hidden,
-        MacroMapSprite,
-    ));
-}
-
-// Updates the tile-color cache for chunks whose tiles have been painted.
-fn update_tile_cache(
-    mut map_data: ResMut<MapData>,
-    mut macro_data: ResMut<MacroMapData>,
-    tile_registry: Res<TileRegistry>,
+    prop_registry: Res<PropRegistry>,
+    prop_query: Query<(&GridPos, &PropType, Option<&AnimationState>)>,
 )
 {
     let cs = map_data.chunk_size;
+    let ts = map_data.tile_size as f32;
+    let chunk_world_size = cs as f32 * ts;
+    let mut chunk_handles = Vec::with_capacity((map_data.chunks_x * map_data.chunks_y) as usize);
 
     for cy in 0 .. map_data.chunks_y
     {
         for cx in 0 .. map_data.chunks_x
         {
-            if !map_data.take_macro_chunk_dirty(cx, cy)
-            {
-                continue;
-            }
+            let mut pixels = vec![0u8; (cs * cs * 4) as usize];
+            fill_macro_chunk_pixels(
+                &mut pixels,
+                cx,
+                cy,
+                &map_data,
+                &tile_registry,
+                &prop_registry,
+                &prop_query,
+            );
 
-            let x0 = cx * cs;
-            let y0 = cy * cs;
-            for ly in 0 .. cs
-            {
-                for lx in 0 .. cs
-                {
-                    let gx = x0 + lx;
-                    let gy = y0 + ly;
-                    let tile_type = map_data.get_tile(gx, gy);
-                    let color = tile_registry
-                        .tiles
-                        .get(&tile_type)
-                        .map(|d| d.macro_color)
-                        .unwrap_or([0, 0, 0]);
-                    let pixel = (gy as usize * macro_data.width as usize + gx as usize) * 4;
-                    macro_data.tile_cache[pixel] = color[0];
-                    macro_data.tile_cache[pixel + 1] = color[1];
-                    macro_data.tile_cache[pixel + 2] = color[2];
-                    macro_data.tile_cache[pixel + 3] = 255;
-                }
-            }
-            macro_data.dirty = true;
+            let image = Image::new(
+                Extent3d { width: cs, height: cs, depth_or_array_layers: 1 },
+                TextureDimension::D2,
+                pixels,
+                TextureFormat::Rgba8UnormSrgb,
+                RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+            );
+            let handle = images.add(image);
+            chunk_handles.push(handle.clone());
+
+            let origin = map_data.chunk_world_origin(cx, cy);
+            let half = chunk_world_size / 2.0;
+
+            commands.spawn((
+                Sprite {
+                    image: handle,
+                    custom_size: Some(Vec2::splat(chunk_world_size)),
+                    ..default()
+                },
+                Transform::from_xyz(origin.x + half, origin.y + half, 1.0)
+                    .with_scale(Vec3::new(1.0, -1.0, 1.0)),
+                Visibility::Hidden,
+                MacroMapChunk { cx, cy },
+                MacroRenderLayer,
+            ));
         }
     }
+
+    // Generate a 32x32 anti-aliased circle texture for macro dots.
+    let dot_size = 32;
+    let mut dot_pixels = vec![0u8; dot_size * dot_size * 4];
+    let center = dot_size as f32 / 2.0;
+    let radius = center - 1.0;
+    for y in 0 .. dot_size
+    {
+        for x in 0 .. dot_size
+        {
+            let dx = x as f32 + 0.5 - center;
+            let dy = y as f32 + 0.5 - center;
+            let dist = (dx * dx + dy * dy).sqrt();
+            let alpha = (1.0 - (dist - radius)).clamp(0.0, 1.0) * 255.0;
+            let idx = (y * dot_size + x) * 4;
+            dot_pixels[idx] = 255;
+            dot_pixels[idx + 1] = 255;
+            dot_pixels[idx + 2] = 255;
+            dot_pixels[idx + 3] = alpha as u8;
+        }
+    }
+    let dot_image = Image::new(
+        Extent3d { width: dot_size as u32, height: dot_size as u32, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        dot_pixels,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+    );
+    let dot_texture = images.add(dot_image);
+    commands.insert_resource(MacroDotTexture(dot_texture));
+
+    commands.insert_resource(MacroChunkData { chunk_handles });
 }
 
-// Composites the macro map image from the tile cache, prop colors, dots, and outline.
-fn paint_macro_map(
-    mut map_data: ResMut<MacroMapData>,
-    prop_registry: Res<PropRegistry>,
-    outline_anim: Res<OutlineAnimation>,
-    mut images: ResMut<Assets<Image>>,
-    prop_query: Query<(&GridPos, &PropType, Option<&AnimationState>)>,
-    dot_query: Query<(&GridPos, &MacroMapDot)>,
+// Composite base tiles and fixed props into a macro chunk's pixel buffer.
+fn fill_macro_chunk_pixels(
+    pixels: &mut [u8],
+    cx: u32,
+    cy: u32,
+    map_data: &MapData,
+    tile_registry: &TileRegistry,
+    prop_registry: &PropRegistry,
+    prop_query: &Query<(&GridPos, &PropType, Option<&AnimationState>)>,
 )
 {
-    if !map_data.dirty && !outline_anim.is_changed()
+    let cs = map_data.chunk_size;
+    let tile_x0 = cx * cs;
+    let tile_y0 = cy * cs;
+
+    // Draw base tiles.
+    for ly in 0 .. cs
     {
-        return;
+        for lx in 0 .. cs
+        {
+            let gx = tile_x0 + lx;
+            let gy = tile_y0 + ly;
+            let tile_type = map_data.get_tile(gx, gy);
+            let color = tile_registry
+                .tiles
+                .get(&tile_type)
+                .map(|d| d.macro_color)
+                .unwrap_or([0, 0, 0]);
+
+            let idx = (ly * cs + lx) as usize * 4;
+            pixels[idx] = color[0];
+            pixels[idx + 1] = color[1];
+            pixels[idx + 2] = color[2];
+            pixels[idx + 3] = 255;
+        }
     }
-    map_data.dirty = false;
-    let Some(image) = images.get_mut(&map_data.handle)
-    else
-    {
-        return;
-    };
-    let Some(data) = image.data.as_mut()
-    else
-    {
-        return;
-    };
 
-    // Start from the clean tile cache.
-    data.copy_from_slice(&map_data.tile_cache);
-
-    // Overlay prop macro colors.
-    for (pos, prop_type, anim) in &prop_query
+    // Draw fixed props.
+    for (pos, prop_type, anim) in prop_query
     {
         let frame = anim.map(|a| a.current_frame).unwrap_or(0);
         if let Some((size, colors)) = prop_registry.get_prop_data(*prop_type, frame)
@@ -198,77 +200,58 @@ fn paint_macro_map(
                 {
                     let px = pos.x + dx;
                     let py = pos.y + (size.y - 1 - dy);
-                    if px >= 0 && px < map_data.width && py >= 0 && py < map_data.height
+
+                    // Check if this pixel falls inside this chunk.
+                    if px >= tile_x0 as i32
+                        && px < (tile_x0 + cs) as i32
+                        && py >= tile_y0 as i32
+                        && py < (tile_y0 + cs) as i32
                     {
-                        let idx = ((py * map_data.width) + px) as usize * 4;
-                        if data[idx .. idx + 4] == map_data.tile_cache[idx .. idx + 4]
-                        {
-                            data[idx .. idx + 4].copy_from_slice(&colors[i]);
-                        }
+                        let lx = (px - tile_x0 as i32) as u32;
+                        let ly = (py - tile_y0 as i32) as u32;
+                        let idx = (ly * cs + lx) as usize * 4;
+                        pixels[idx .. idx + 4].copy_from_slice(&colors[i]);
                     }
                     i += 1;
                 }
             }
         }
     }
+}
 
-    // Overlay single-pixel dots (entities like humans, animals).
-    for (pos, dot) in &dot_query
+// Rebuild dirty macro chunks.
+fn update_tile_cache(
+    mut map_data: ResMut<MapData>,
+    macro_data: Res<MacroChunkData>,
+    tile_registry: Res<TileRegistry>,
+    prop_registry: Res<PropRegistry>,
+    mut images: ResMut<Assets<Image>>,
+    prop_query: Query<(&GridPos, &PropType, Option<&AnimationState>)>,
+)
+{
+    for cy in 0 .. map_data.chunks_y
     {
-        if pos.x >= 0 && pos.x < map_data.width && pos.y >= 0 && pos.y < map_data.height
+        for cx in 0 .. map_data.chunks_x
         {
-            let idx = ((pos.y * map_data.width) + pos.x) as usize * 4;
-            if data[idx .. idx + 4] == map_data.tile_cache[idx .. idx + 4]
+            if !map_data.take_macro_chunk_dirty(cx, cy)
             {
-                data[idx .. idx + 4].copy_from_slice(&dot.color);
-            }
-        }
-    }
-
-    // Paint the animated border outline on top.
-    let outline_rgba = OUTLINE_COLOR_RGBA;
-    let alpha = outline_rgba[3] as u16;
-    let inv_alpha = 255 - alpha;
-    if let Some(frame_tiles) = outline_anim.frames.get(outline_anim.current_frame)
-    {
-        for pos in frame_tiles
-        {
-            let mut dx_in = 0;
-            let mut dy_in = 0;
-            if pos.x == 1
-            {
-                dx_in = 1;
-            }
-            else if pos.x == map_data.width as i32 - 2
-            {
-                dx_in = -1;
+                continue;
             }
 
-            if pos.y == 1
+            let idx = (cy * map_data.chunks_x + cx) as usize;
+            if let Some(image) = images.get_mut(&macro_data.chunk_handles[idx])
             {
-                dy_in = 1;
-            }
-            else if pos.y == map_data.height as i32 - 2
-            {
-                dy_in = -1;
-            }
-
-            for dy in 0 ..= (if dy_in != 0 { 1 } else { 0 })
-            {
-                for dx in 0 ..= (if dx_in != 0 { 1 } else { 0 })
+                if let Some(data) = image.data.as_mut()
                 {
-                    let px = pos.x + dx * dx_in;
-                    let py = pos.y + dy * dy_in;
-                    if px >= 0 && px < map_data.width && py >= 0 && py < map_data.height
-                    {
-                        let idx = ((py * map_data.width) + px) as usize * 4;
-                        for c in 0 .. 3
-                        {
-                            data[idx + c] = ((data[idx + c] as u16 * inv_alpha
-                                + outline_rgba[c] as u16 * alpha)
-                                / 255) as u8;
-                        }
-                    }
+                    fill_macro_chunk_pixels(
+                        data,
+                        cx,
+                        cy,
+                        &map_data,
+                        &tile_registry,
+                        &prop_registry,
+                        &prop_query,
+                    );
                 }
             }
         }
@@ -295,26 +278,68 @@ fn handle_zoom_states(
     }
 }
 
-// Shows the macro map sprite and forces a repaint.
-fn show_macro(
-    mut q: Query<&mut Visibility, With<MacroMapSprite>>,
-    mut macro_data: ResMut<MacroMapData>,
-)
+// Shows the macro map layer.
+fn show_macro(mut q: Query<&mut Visibility, With<MacroRenderLayer>>)
 {
     for mut vis in &mut q
     {
-        *vis = Visibility::Visible;
+        *vis = Visibility::Inherited;
     }
-    // Force a repaint on the first macro frame.
-    macro_data.dirty = true;
 }
 
-// Hides the macro map sprite.
-fn hide_macro(mut q: Query<&mut Visibility, With<MacroMapSprite>>)
+// Hides the macro map layer.
+fn hide_macro(mut q: Query<&mut Visibility, With<MacroRenderLayer>>)
 {
     for mut vis in &mut q
     {
         *vis = Visibility::Hidden;
+    }
+}
+
+// Spawns separate sprite entities for dots so they aren't hidden by their parent's
+// StandardRenderLayer.
+fn spawn_macro_dots(
+    mut commands: Commands,
+    query: Query<(Entity, &MacroMapDot), Added<MacroMapDot>>,
+    map_data: Res<MapData>,
+    dot_texture: Res<MacroDotTexture>,
+)
+{
+    let ts = map_data.tile_size as f32;
+    let diameter = ts * (2.0 / 3.0);
+
+    for (entity, dot) in &query
+    {
+        commands.spawn((
+            Sprite {
+                image: dot_texture.0.clone(),
+                color: Color::srgba_u8(dot.color[0], dot.color[1], dot.color[2], dot.color[3]),
+                custom_size: Some(Vec2::splat(diameter)),
+                ..default()
+            },
+            Transform::from_xyz(0.0, 0.0, 1.1),
+            MacroRenderLayer,
+            FollowTransform(entity),
+            Visibility::Hidden,
+        ));
+    }
+}
+
+// Syncs macro dot sprite transforms to their dynamic parents.
+fn sync_follow_transforms(
+    parent_query: Query<&Transform, Without<FollowTransform>>,
+    mut child_query: Query<(&mut Transform, &FollowTransform)>,
+)
+{
+    for (mut tf, follow) in &mut child_query
+    {
+        if let Ok(parent_tf) = parent_query.get(follow.0)
+        {
+            tf.translation.x = parent_tf.translation.x;
+            tf.translation.y = parent_tf.translation.y;
+            // Z=1.1 keeps dots on top of the Z=1.0 macro chunks.
+            tf.translation.z = 1.1;
+        }
     }
 }
 
@@ -348,9 +373,8 @@ impl Plugin for MacroMapPlugin
                 init_macro_engine.after(crate::engine::spritesheet::build_atlas_layouts),
             )
             .add_systems(Update, update_tile_cache.after(PaintSet))
-            .add_systems(Update, handle_zoom_states)
+            .add_systems(Update, (handle_zoom_states, spawn_macro_dots, sync_follow_transforms))
             .add_systems(OnEnter(MapMode::Macro), (show_macro, hide_standard))
-            .add_systems(OnEnter(MapMode::Standard), (show_standard, hide_macro))
-            .add_systems(Update, paint_macro_map.run_if(in_state(MapMode::Macro)));
+            .add_systems(OnEnter(MapMode::Standard), (show_standard, hide_macro));
     }
 }

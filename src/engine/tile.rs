@@ -6,8 +6,8 @@ use bevy::prelude::*;
 #[derive(Clone, Debug)]
 pub struct TileDefinition
 {
-    // Starting sprite index in the spritesheet for this type's 16-tile cardinal set.
-    pub blob_offset: u32,
+    // Index of the 8x8 template sprite for this tile type in the tileset.
+    pub template_idx: usize,
     // Render priority: higher-priority types overlay onto lower-priority tiles.
     pub priority: u8,
     // Color used on the macro (zoomed-out) map.
@@ -43,42 +43,42 @@ impl Default for TileRegistry
 
         tiles.insert(
             TileType::PlainGrass,
-            TileDefinition { blob_offset: 0, priority: 4, macro_color: [125, 172, 69] },
+            TileDefinition { template_idx: 0, priority: 4, macro_color: [125, 172, 69] },
         );
 
         tiles.insert(
             TileType::ForestGrass,
-            TileDefinition { blob_offset: 16, priority: 5, macro_color: [106, 145, 64] },
+            TileDefinition { template_idx: 1, priority: 5, macro_color: [88, 144, 56] },
         );
 
         tiles.insert(
             TileType::Sand,
-            TileDefinition { blob_offset: 32, priority: 3, macro_color: [222, 216, 151] },
+            TileDefinition { template_idx: 2, priority: 3, macro_color: [247, 232, 152] },
         );
 
         tiles.insert(
             TileType::Hill,
-            TileDefinition { blob_offset: 48, priority: 6, macro_color: [101, 99, 90] },
+            TileDefinition { template_idx: 3, priority: 6, macro_color: [87, 87, 87] },
         );
 
         tiles.insert(
             TileType::Mountain,
-            TileDefinition { blob_offset: 64, priority: 7, macro_color: [70, 69, 64] },
+            TileDefinition { template_idx: 4, priority: 7, macro_color: [61, 61, 61] },
         );
 
         tiles.insert(
             TileType::ShallowWater,
-            TileDefinition { blob_offset: 80, priority: 2, macro_color: [84, 170, 231] },
+            TileDefinition { template_idx: 5, priority: 2, macro_color: [92, 181, 240] },
         );
 
         tiles.insert(
             TileType::DeepWater,
-            TileDefinition { blob_offset: 96, priority: 1, macro_color: [67, 138, 235] },
+            TileDefinition { template_idx: 6, priority: 1, macro_color: [64, 132, 226] },
         );
 
         tiles.insert(
             TileType::Ocean,
-            TileDefinition { blob_offset: 112, priority: 0, macro_color: [48, 104, 187] },
+            TileDefinition { template_idx: 7, priority: 0, macro_color: [51, 112, 204] },
         );
 
         return Self { tiles };

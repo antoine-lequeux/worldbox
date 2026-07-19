@@ -33,6 +33,8 @@ pub struct MapData
     pub dirty_chunks: Vec<bool>,
     // Separate dirty flags for the macro map (not cleared by autotile rebuild).
     pub macro_dirty_chunks: Vec<bool>,
+    // Per-tile random variation value (0.0 to 1.0).
+    pub variations: Vec<f32>,
 }
 
 impl MapData
@@ -53,6 +55,12 @@ impl MapData
     pub fn get_tile(&self, x: u32, y: u32) -> TileType
     {
         return self.tiles[(y * self.width + x) as usize];
+    }
+
+    // Returns the random variation float [0.0..1.0) for the given tile coordinates.
+    pub fn get_variation(&self, x: u32, y: u32) -> f32
+    {
+        return self.variations[(y * self.width + x) as usize];
     }
 
     // Sets a tile and marks the containing chunk dirty. Returns true if the type changed.
@@ -1124,6 +1132,9 @@ fn generate_map() -> MapData
         };
     });
 
+    info!("Generating per-tile variations...");
+    let variations: Vec<f32> = (0 .. n).map(|_| rng.random::<f32>()).collect();
+
     info!("World generation complete.");
 
     return MapData {
@@ -1136,6 +1147,7 @@ fn generate_map() -> MapData
         chunks_y: MAP_HEIGHT,
         dirty_chunks: vec![false; (MAP_WIDTH * MAP_HEIGHT) as usize],
         macro_dirty_chunks: vec![false; (MAP_WIDTH * MAP_HEIGHT) as usize],
+        variations,
     };
 }
 

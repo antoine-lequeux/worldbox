@@ -26,17 +26,22 @@ pub struct ChunkCoord
 }
 
 // CPU-side copy of the tileset image pixels, used for blitting tiles into chunk textures.
+pub struct ParsedTemplate
+{
+    pub base: [u8; 64],
+    pub overlay_from_n: [u8; 64],
+    pub overlay_from_e: [u8; 64],
+    pub overlay_from_s: [u8; 64],
+    pub overlay_from_w: [u8; 64],
+}
+
+// CPU-side copy of the tileset image pixels, used for blitting tiles into chunk textures.
 #[derive(Resource)]
 pub struct TilesetPixels
 {
-    // Raw RGBA pixel data.
-    data: Vec<u8>,
-    // Image width in pixels.
-    width: u32,
+    pub templates: Vec<Vec<ParsedTemplate>>,
     // Size of one tile in pixels.
-    tile_size: u32,
-    // Number of tile columns in the tileset.
-    columns: u32,
+    pub tile_size: u32,
 }
 
 impl TilesetPixels
@@ -44,75 +49,150 @@ impl TilesetPixels
     // Extracts pixel data from a loaded tileset image.
     fn from_image(image: &Image, tile_size: u32, columns: u32) -> Self
     {
-        return Self {
-            data: image
-                .data
-                .as_ref()
-                .expect("tileset image has no pixel data")
-                .clone(),
-            width: image.width(),
-            tile_size,
-            columns,
-        };
+        let data = image
+            .data
+            .as_ref()
+            .expect("tileset image has no pixel data");
+        let width = image.width();
+        let rows = image.height() / tile_size;
+        let mut templates = Vec::new();
+
+        for r in 0 .. rows
+        {
+            let mut row_variations = Vec::new();
+            for c in 0 .. columns
+            {
+                let mut parsed = ParsedTemplate {
+                    base: [0; 64],
+                    overlay_from_n: [0; 64],
+                    overlay_from_e: [0; 64],
+                    overlay_from_s: [0; 64],
+                    overlay_from_w: [0; 64],
+                };
+
+                let src_x0 = c * 8;
+                let src_y0 = r * 8;
+
+                let get_px = |x: u32, y: u32| -> [u8; 4] {
+                    let idx = ((src_y0 + y) * width + (src_x0 + x)) as usize * 4;
+                    [data[idx], data[idx + 1], data[idx + 2], data[idx + 3]]
+                };
+
+                // Check if the 8x8 block is completely empty (no opaque pixels).
+                let mut is_empty = true;
+                for y in 0 .. 8
+                {
+                    for x in 0 .. 8
+                    {
+                        if get_px(x, y)[3] > 0
+                        {
+                            is_empty = false;
+                        }
+                    }
+                }
+
+                if is_empty
+                {
+                    break;
+                }
+
+                // Base: 4x4 center of the 8x8 template (x=2..5, y=2..5)
+                for y in 0 .. 4
+                {
+                    for x in 0 .. 4
+                    {
+                        let px = get_px(2 + x, 2 + y);
+                        let out_idx = (y * 4 + x) as usize * 4;
+                        parsed.base[out_idx .. out_idx + 4].copy_from_slice(&px);
+                    }
+                }
+
+                // overlay_from_n: South edge of neighbor (y=6..7, x=2..5) drawn at Top (y=0..1)
+                for y in 0 .. 2
+                {
+                    for x in 0 .. 4
+                    {
+                        let px = get_px(2 + x, 6 + y);
+                        let out_idx = (y * 4 + x) as usize * 4;
+                        parsed.overlay_from_n[out_idx .. out_idx + 4].copy_from_slice(&px);
+                    }
+                }
+
+                // overlay_from_e: West edge of neighbor (x=0..1, y=2..5) drawn at Right (x=2..3)
+                for y in 0 .. 4
+                {
+                    for x in 0 .. 2
+                    {
+                        let px = get_px(x, 2 + y);
+                        let out_idx = (y * 4 + (x + 2)) as usize * 4;
+                        parsed.overlay_from_e[out_idx .. out_idx + 4].copy_from_slice(&px);
+                    }
+                }
+
+                // overlay_from_s: North edge of neighbor (y=0..1, x=2..5) drawn at Bottom (y=2..3)
+                for y in 0 .. 2
+                {
+                    for x in 0 .. 4
+                    {
+                        let px = get_px(2 + x, y);
+                        let out_idx = ((y + 2) * 4 + x) as usize * 4;
+                        parsed.overlay_from_s[out_idx .. out_idx + 4].copy_from_slice(&px);
+                    }
+                }
+
+                // overlay_from_w: East edge of neighbor (x=6..7, y=2..5) drawn at Left (x=0..1)
+                for y in 0 .. 4
+                {
+                    for x in 0 .. 2
+                    {
+                        let px = get_px(6 + x, 2 + y);
+                        let out_idx = (y * 4 + x) as usize * 4;
+                        parsed.overlay_from_w[out_idx .. out_idx + 4].copy_from_slice(&px);
+                    }
+                }
+
+                row_variations.push(parsed);
+            }
+            templates.push(row_variations);
+        }
+
+        return Self { templates, tile_size: 4 };
     }
 }
 
 // Opaque blit: copies one tile from the tileset into the chunk pixel buffer.
-fn blit_tile(
-    dst: &mut [u8],
-    dst_w: u32,
-    dst_x: u32,
-    dst_y: u32,
-    tileset: &TilesetPixels,
-    sprite_idx: u32,
-)
+fn blit_tile(dst: &mut [u8], dst_w: u32, dst_x: u32, dst_y: u32, src_buf: &[u8; 64])
 {
-    let ts = tileset.tile_size;
-    let col = sprite_idx % tileset.columns;
-    let row = sprite_idx / tileset.columns;
-    let src_x0 = col * ts;
-    let src_y0 = row * ts;
+    let ts = 4;
     let stride = (ts as usize) * 4;
 
     for sy in 0 .. ts
     {
-        let src_off = ((src_y0 + sy) * tileset.width + src_x0) as usize * 4;
+        let src_off = (sy * ts) as usize * 4;
         let dst_off = ((dst_y + sy) * dst_w + dst_x) as usize * 4;
-        dst[dst_off .. dst_off + stride]
-            .copy_from_slice(&tileset.data[src_off .. src_off + stride]);
+        dst[dst_off .. dst_off + stride].copy_from_slice(&src_buf[src_off .. src_off + stride]);
     }
 }
 
 // Alpha-composited blit: draws a tile sprite on top of existing chunk pixels.
-fn alpha_blit_tile(
-    dst: &mut [u8],
-    dst_w: u32,
-    dst_x: u32,
-    dst_y: u32,
-    tileset: &TilesetPixels,
-    sprite_idx: u32,
-)
+fn alpha_blit_tile(dst: &mut [u8], dst_w: u32, dst_x: u32, dst_y: u32, src_buf: &[u8; 64])
 {
-    let ts = tileset.tile_size;
-    let col = sprite_idx % tileset.columns;
-    let row = sprite_idx / tileset.columns;
-    let src_x0 = col * ts;
-    let src_y0 = row * ts;
+    let ts = 4;
 
     for sy in 0 .. ts
     {
         for sx in 0 .. ts
         {
-            let si = ((src_y0 + sy) * tileset.width + (src_x0 + sx)) as usize * 4;
+            let si = (sy * ts + sx) as usize * 4;
             let di = ((dst_y + sy) * dst_w + (dst_x + sx)) as usize * 4;
-            let sa = tileset.data[si + 3] as u16;
+            let sa = src_buf[si + 3] as u16;
             if sa == 0
             {
                 continue;
             }
             if sa == 255
             {
-                dst[di .. di + 4].copy_from_slice(&tileset.data[si .. si + 4]);
+                dst[di .. di + 4].copy_from_slice(&src_buf[si .. si + 4]);
             }
             else
             {
@@ -120,7 +200,7 @@ fn alpha_blit_tile(
                 for c in 0 .. 3
                 {
                     dst[di + c] =
-                        ((dst[di + c] as u16 * inv + tileset.data[si + c] as u16 * sa) / 255) as u8;
+                        ((dst[di + c] as u16 * inv + src_buf[si + c] as u16 * sa) / 255) as u8;
                 }
                 dst[di + 3] = 255;
             }
@@ -153,12 +233,17 @@ fn fill_chunk_pixels(
             let tile_type = map_data.get_tile(gx, gy);
             let def = tile_registry.tiles.get(&tile_type).unwrap();
 
+            let row_vars = &tileset.templates[def.template_idx];
+            let var_idx = (map_data.get_variation(gx, gy) * row_vars.len() as f32) as usize;
+            let var_idx = var_idx.clamp(0, row_vars.len().saturating_sub(1));
+            let template = &row_vars[var_idx];
+
             // Pixel coords: Y is flipped (tile y=0 -> bottom of image).
             let px = lx * ts;
             let py = (cs - 1 - ly) * ts;
 
             // Base tile (opaque copy).
-            blit_tile(pixels, tex_w, px, py, tileset, def.blob_offset);
+            blit_tile(pixels, tex_w, px, py, &template.base);
 
             // Cardinal overlays (alpha-composited on top).
             for dir in 0 .. 4
@@ -166,7 +251,25 @@ fn fill_chunk_pixels(
                 if let Some(overlay_idx) =
                     autotile::compute_overlay_for_dir(gx, gy, dir, map_data, tile_registry)
                 {
-                    alpha_blit_tile(pixels, tex_w, px, py, tileset, overlay_idx);
+                    let (dx, dy) = autotile::CARDINAL_OFFSETS[dir];
+                    let nx = (gx as i32 + dx) as u32;
+                    let ny = (gy as i32 + dy) as u32;
+
+                    let n_row_vars = &tileset.templates[overlay_idx];
+                    let n_var_idx =
+                        (map_data.get_variation(nx, ny) * n_row_vars.len() as f32) as usize;
+                    let n_var_idx = n_var_idx.clamp(0, n_row_vars.len().saturating_sub(1));
+                    let n_template = &n_row_vars[n_var_idx];
+
+                    let overlay_buf = match dir
+                    {
+                        0 => &n_template.overlay_from_n,
+                        1 => &n_template.overlay_from_e,
+                        2 => &n_template.overlay_from_s,
+                        3 => &n_template.overlay_from_w,
+                        _ => unreachable!(),
+                    };
+                    alpha_blit_tile(pixels, tex_w, px, py, overlay_buf);
                 }
             }
         }
@@ -236,9 +339,11 @@ fn setup_chunks(
     // Extract tileset pixel data for CPU blitting.
     let tileset_handle = &sheet_registry.images[&SpritesheetID::Terrain];
     let tileset_image = images.get(tileset_handle).unwrap();
-    let tileset_def = sheet_registry.get(SpritesheetID::Terrain).unwrap();
-    let tile_tex_size = tileset_image.width() / tileset_def.grid.x;
-    let tileset = TilesetPixels::from_image(tileset_image, tile_tex_size, tileset_def.grid.x);
+
+    // Each template sprite is exactly 8x8 pixels.
+    let template_size = 8;
+    let columns = tileset_image.width() / template_size;
+    let tileset = TilesetPixels::from_image(tileset_image, template_size, columns);
 
     let num_chunks = (map_data.chunks_x * map_data.chunks_y) as usize;
     let world_chunk = (map_data.chunk_size * map_data.tile_size) as f32;
@@ -475,6 +580,6 @@ impl Plugin for CustomTilemapPlugin
                     .run_if(resource_exists::<ChunkLoadState>)
                     .after(PaintSet),
             )
-            .insert_resource(ClearColor(Color::srgb_u8(48, 104, 187)));
+            .insert_resource(ClearColor(Color::srgb_u8(51, 112, 204)));
     }
 }
