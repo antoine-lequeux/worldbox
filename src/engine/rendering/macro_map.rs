@@ -10,7 +10,7 @@ use crate::engine::{
     coords::GridPos,
     mapgen::MapData,
     painting::PaintSet,
-    prop::{AnimationState, PropRegistry, PropType},
+    prop::{AnimationState, PropRegistry, PropType, VariationIndex},
     tile::TileRegistry,
 };
 
@@ -66,7 +66,7 @@ fn init_macro_engine(
     map_data: Res<MapData>,
     tile_registry: Res<TileRegistry>,
     prop_registry: Res<PropRegistry>,
-    prop_query: Query<(&GridPos, &PropType, Option<&AnimationState>)>,
+    prop_query: Query<(&GridPos, &PropType, &VariationIndex, Option<&AnimationState>)>,
 )
 {
     let cs = map_data.chunk_size;
@@ -158,7 +158,7 @@ fn fill_macro_chunk_pixels(
     map_data: &MapData,
     tile_registry: &TileRegistry,
     prop_registry: &PropRegistry,
-    prop_query: &Query<(&GridPos, &PropType, Option<&AnimationState>)>,
+    prop_query: &Query<(&GridPos, &PropType, &VariationIndex, Option<&AnimationState>)>,
 )
 {
     let cs = map_data.chunk_size;
@@ -188,10 +188,12 @@ fn fill_macro_chunk_pixels(
     }
 
     // Draw fixed props.
-    for (pos, prop_type, anim) in prop_query
+    for (pos, prop_type, variation_index, anim) in prop_query
     {
         let frame = anim.map(|a| a.current_frame).unwrap_or(0);
-        if let Some((size, colors)) = prop_registry.get_prop_data(*prop_type, frame)
+        let variation = variation_index.0;
+
+        if let Some((size, colors)) = prop_registry.get_prop_data(*prop_type, frame, variation)
         {
             let mut i = 0;
             for dy in 0 .. size.y
@@ -226,7 +228,7 @@ fn update_tile_cache(
     tile_registry: Res<TileRegistry>,
     prop_registry: Res<PropRegistry>,
     mut images: ResMut<Assets<Image>>,
-    prop_query: Query<(&GridPos, &PropType, Option<&AnimationState>)>,
+    prop_query: Query<(&GridPos, &PropType, &VariationIndex, Option<&AnimationState>)>,
 )
 {
     for cy in 0 .. map_data.chunks_y

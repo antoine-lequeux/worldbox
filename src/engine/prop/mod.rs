@@ -12,15 +12,17 @@ pub struct PropSpriteBundle
 {
     pub sprite: Sprite,
     pub prop_type: PropType,
+    pub variation_index: VariationIndex,
     pub anim: AnimationState,
 }
 
 impl PropRegistry
 {
-    // Builds a PropSpriteBundle for the given prop type, ready to spawn.
+    // Builds a PropSpriteBundle for the given prop type and variation.
     pub fn sprite_bundle(
         &self,
         prop_type: PropType,
+        variation: u32,
         sheets: &SpritesheetRegistry,
     ) -> PropSpriteBundle
     {
@@ -32,7 +34,10 @@ impl PropRegistry
             .get(def.sheet_id)
             .unwrap_or_else(|| panic!("Sheet '{:?}' not registered", def.sheet_id));
 
-        let origin = def.sprite.frame_origin(0);
+        // Atlas index for frame 0 of the chosen variation.
+        // grid.x = variation columns, grid.y = frame rows.
+        // atlas_index = frame_row * grid.x + variation_col
+        let origin = def.sprite.frame_origin(variation, 0);
         let atlas_index = (origin.y * sheet.grid.x + origin.x) as usize;
 
         return PropSpriteBundle {
@@ -41,24 +46,22 @@ impl PropRegistry
                 TextureAtlas { layout: sheets.layouts[&def.sheet_id].clone(), index: atlas_index },
             ),
             prop_type,
+            variation_index: VariationIndex(variation),
             anim: AnimationState::default(),
         };
     }
 }
 
-// Describes how a prop's sprite is laid out in its spritesheet.
+// Describes the animation layout of a prop in its spritesheet.
 #[derive(Clone, Debug)]
 pub enum PropSprite
 {
-    Static
-    {
-        // Top-left of the sprite in grid-index coordinates: (0,0), (0,1)...
-        origin: UVec2,
-    },
+    Static,
+    // Frames are stacked in successive rows within the chosen variation column.
     Animated
     {
-        // Grid-index origin for each frame, in order.
-        frames: Vec<UVec2>,
+        // Total number of animation frames (number of rows used).
+        frame_count: u32,
         // Seconds between frame advances.
         period: f32,
     },
@@ -71,18 +74,8 @@ impl PropSprite
     {
         return match self
         {
-            Self::Static { .. } => 1,
-            Self::Animated { frames, .. } => frames.len(),
-        };
-    }
-
-    // Returns the spritesheet grid origin for the given frame index.
-    pub fn frame_origin(&self, frame: usize) -> UVec2
-    {
-        return match self
-        {
-            Self::Static { origin } => *origin,
-            Self::Animated { frames, .. } => frames[frame % frames.len()],
+            Self::Static => 1,
+            Self::Animated { frame_count, .. } => *frame_count as usize,
         };
     }
 
@@ -91,9 +84,16 @@ impl PropSprite
     {
         return match self
         {
-            Self::Static { .. } => None,
+            Self::Static => None,
             Self::Animated { period, .. } => Some(*period),
         };
+    }
+
+    // Returns the spritesheet grid origin (col = variation, row = frame) for a
+    // given variation index and animation frame.
+    pub fn frame_origin(&self, variation: u32, frame: usize) -> UVec2
+    {
+        return UVec2::new(variation, frame as u32);
     }
 }
 
@@ -105,21 +105,33 @@ pub struct PropDefinition
     pub sheet_id: SpritesheetID,
     // Size in world tiles.
     pub size_tiles: UVec2,
-    // Sprite layout (static or animated frames).
+    // Sprite layout (static or animated).
     pub sprite: PropSprite,
+    // Number of variation columns available in the spritesheet.
+    pub variation_count: u32,
     // Whether macro map colors should be sampled from the sprite image.
     pub sample_macro_colors: bool,
-    // Precomputed macro colors per frame per tile. Layout: [frame][row * size_tiles.x + col].
-    pub macro_colors: Vec<Vec<[u8; 4]>>,
+    // Precomputed macro colors. Layout: [variation][frame][tile_row * size_tiles.x + tile_col].
+    pub macro_colors: Vec<Vec<Vec<[u8; 4]>>>,
 }
 
 // Identifies the kind of prop (used as a component and registry key).
 #[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum PropType
 {
-    House,
-    HumanAnimation,
+    HouseTier1,
+    HouseTier2,
+    HouseTier3,
+    HumanImperialWalking,
+    HumanForestWalking,
+    HumanNorthernWalking,
+    HumanTribalWalking,
 }
+
+// The variation column chosen at spawn time.
+// Stored as a component so animation and macro-map systems can look it up.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct VariationIndex(pub u32);
 
 // Tracks the current animation frame and elapsed time for animated props.
 #[derive(Component, Clone, Debug, Default)]
@@ -143,34 +155,62 @@ impl Default for PropRegistry
         let mut props = HashMap::new();
 
         props.insert(
-            PropType::House,
+            PropType::HouseTier1,
             PropDefinition {
-                sheet_id: SpritesheetID::House,
+                sheet_id: SpritesheetID::HouseTier1,
                 size_tiles: UVec2::new(2, 2),
-                sprite: PropSprite::Static { origin: UVec2::new(0, 0) },
+                sprite: PropSprite::Static,
+                variation_count: 4,
                 sample_macro_colors: true,
                 macro_colors: Vec::new(),
             },
         );
 
         props.insert(
-            PropType::HumanAnimation,
+            PropType::HouseTier2,
             PropDefinition {
-                sheet_id: SpritesheetID::HumanImperialWalking,
-                size_tiles: UVec2 { x: 1, y: 1 },
-                sprite: PropSprite::Animated {
-                    frames: vec![
-                        UVec2::new(0, 0),
-                        UVec2::new(1, 0),
-                        UVec2::new(2, 0),
-                        UVec2::new(3, 0),
-                    ],
-                    period: 0.08,
-                },
-                sample_macro_colors: false,
+                sheet_id: SpritesheetID::HouseTier2,
+                size_tiles: UVec2::new(2, 2),
+                sprite: PropSprite::Static,
+                variation_count: 4,
+                sample_macro_colors: true,
                 macro_colors: Vec::new(),
             },
         );
+
+        props.insert(
+            PropType::HouseTier3,
+            PropDefinition {
+                sheet_id: SpritesheetID::HouseTier3,
+                size_tiles: UVec2::new(2, 2),
+                sprite: PropSprite::Static,
+                variation_count: 4,
+                sample_macro_colors: true,
+                macro_colors: Vec::new(),
+            },
+        );
+
+        let human_sprite = PropSprite::Animated { frame_count: 4, period: 0.08 };
+
+        for (prop_type, sheet_id) in [
+            (PropType::HumanImperialWalking, SpritesheetID::HumanImperialWalking),
+            (PropType::HumanForestWalking, SpritesheetID::HumanForestWalking),
+            (PropType::HumanNorthernWalking, SpritesheetID::HumanNorthernWalking),
+            (PropType::HumanTribalWalking, SpritesheetID::HumanTribalWalking),
+        ]
+        {
+            props.insert(
+                prop_type,
+                PropDefinition {
+                    sheet_id,
+                    size_tiles: UVec2::new(1, 1),
+                    sprite: human_sprite.clone(),
+                    variation_count: 1,
+                    sample_macro_colors: false,
+                    macro_colors: Vec::new(),
+                },
+            );
+        }
 
         return Self { props };
     }
@@ -178,18 +218,24 @@ impl Default for PropRegistry
 
 impl PropRegistry
 {
-    // Returns the macro map size and color data for a prop at the given animation frame.
-    pub fn get_prop_data(&self, prop_type: PropType, frame: usize) -> Option<(IVec2, &[[u8; 4]])>
+    // Returns the size and per tile macro colors for a prop at a given frame and variation.
+    pub fn get_prop_data(
+        &self,
+        prop_type: PropType,
+        frame: usize,
+        variation: u32,
+    ) -> Option<(IVec2, &[[u8; 4]])>
     {
         let def = self.props.get(&prop_type)?;
         if def.macro_colors.is_empty()
         {
             return None;
         }
-        let colors = def.macro_colors.get(frame % def.macro_colors.len())?;
+        let variation_data = def.macro_colors.get(variation as usize)?;
+        let frame_data = variation_data.get(frame % variation_data.len())?;
         return Some((
             IVec2::new(def.size_tiles.x as i32, def.size_tiles.y as i32),
-            colors.as_slice(),
+            frame_data.as_slice(),
         ));
     }
 }
@@ -202,6 +248,7 @@ pub struct PropSamplingState
 }
 
 // Samples average pixel colors from prop sprite images to populate macro_colors.
+// Layout produced: macro_colors[variation][frame][tile].
 pub fn finish_prop_sampling(
     mut prop_registry: ResMut<PropRegistry>,
     sheet_registry: Res<SpritesheetRegistry>,
@@ -246,34 +293,45 @@ pub fn finish_prop_sampling(
             continue;
         };
 
+        // Cell size in pixels: one cell per (variation, frame) pair.
+        // grid.x = variation columns, grid.y = frame rows.
         let cell_px = UVec2::new(image.width() / sheet.grid.x, image.height() / sheet.grid.y);
-        let mut all_frames: Vec<Vec<[u8; 4]>> = Vec::new();
 
-        for frame_idx in 0 .. def.sprite.frame_count()
+        let mut all_variations: Vec<Vec<Vec<[u8; 4]>>> = Vec::new();
+
+        for variation in 0 .. def.variation_count
         {
-            let origin = def.sprite.frame_origin(frame_idx);
-            let sprite_px = origin * cell_px;
-            let tile_px = cell_px / def.size_tiles;
-            let mut frame_colors: Vec<[u8; 4]> = Vec::new();
+            let mut variation_frames: Vec<Vec<[u8; 4]>> = Vec::new();
 
-            for ty in 0 .. def.size_tiles.y
+            for frame_idx in 0 .. def.sprite.frame_count()
             {
-                for tx in 0 .. def.size_tiles.x
+                let origin = def.sprite.frame_origin(variation, frame_idx);
+                let sprite_px = origin * cell_px;
+                let tile_px = cell_px / def.size_tiles;
+
+                let mut frame_colors: Vec<[u8; 4]> = Vec::new();
+
+                for ty in 0 .. def.size_tiles.y
                 {
-                    frame_colors.push(sample_average(
-                        image,
-                        sprite_px.x + tx * tile_px.x,
-                        sprite_px.y + ty * tile_px.y,
-                        tile_px.x,
-                        tile_px.y,
-                    ));
+                    for tx in 0 .. def.size_tiles.x
+                    {
+                        frame_colors.push(sample_average(
+                            image,
+                            sprite_px.x + tx * tile_px.x,
+                            sprite_px.y + ty * tile_px.y,
+                            tile_px.x,
+                            tile_px.y,
+                        ));
+                    }
                 }
+
+                variation_frames.push(frame_colors);
             }
 
-            all_frames.push(frame_colors);
+            all_variations.push(variation_frames);
         }
 
-        def.macro_colors = all_frames;
+        def.macro_colors = all_variations;
     }
 
     state.done = true;
@@ -342,13 +400,17 @@ pub fn update_animations(
 }
 
 // Updates each prop's Sprite atlas index when its AnimationState changes.
+// Uses the stored VariationIndex to compute the correct atlas cell.
 pub fn sync_sprite_frame(
     prop_registry: Res<PropRegistry>,
     sheet_registry: Res<SpritesheetRegistry>,
-    mut query: Query<(&PropType, &AnimationState, &mut Sprite), Changed<AnimationState>>,
+    mut query: Query<
+        (&PropType, &VariationIndex, &AnimationState, &mut Sprite),
+        Changed<AnimationState>,
+    >,
 )
 {
-    for (prop_type, anim, mut sprite) in &mut query
+    for (prop_type, variation_index, anim, mut sprite) in &mut query
     {
         let Some(def) = prop_registry.props.get(prop_type)
         else
@@ -361,7 +423,10 @@ pub fn sync_sprite_frame(
             continue;
         };
 
-        let origin = def.sprite.frame_origin(anim.current_frame);
+        // atlas_index = frame_row * variation_cols + variation_col
+        let origin = def
+            .sprite
+            .frame_origin(variation_index.0, anim.current_frame);
         let index = (origin.y * sheet.grid.x + origin.x) as usize;
 
         if let Some(atlas) = &mut sprite.texture_atlas

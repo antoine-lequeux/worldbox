@@ -8,20 +8,47 @@ pub enum SpritesheetID
 {
     Terrain,
     HumanImperialWalking,
-    House,
+    HumanForestWalking,
+    HumanNorthernWalking,
+    HumanTribalWalking,
+    HouseTier1,
+    HouseTier2,
+    HouseTier3,
 }
 
 // All spritesheets must be registered here.
-// The 'grid' parameter is the number of columns/rows in the sheet.
+//
+// Grid convention:
+//   grid.x = number of columns = number of variations
+//   grid.y = number of rows = number of animation frames
 pub fn register_spritesheets(mut sheets: ResMut<SpritesheetRegistry>)
 {
     sheets.register(SpritesheetID::Terrain, "art/sprites/tileset.png", UVec2::new(1, 8));
-    sheets.register(SpritesheetID::House, "art/sprites/house.png", UVec2::new(1, 1));
+
     sheets.register(
         SpritesheetID::HumanImperialWalking,
         "art/sprites/human_imperial_walking.png",
-        UVec2::new(4, 1),
+        UVec2::new(1, 4),
     );
+    sheets.register(
+        SpritesheetID::HumanForestWalking,
+        "art/sprites/human_forest_walking.png",
+        UVec2::new(1, 4),
+    );
+    sheets.register(
+        SpritesheetID::HumanNorthernWalking,
+        "art/sprites/human_northern_walking.png",
+        UVec2::new(1, 4),
+    );
+    sheets.register(
+        SpritesheetID::HumanTribalWalking,
+        "art/sprites/human_tribal_walking.png",
+        UVec2::new(1, 4),
+    );
+
+    sheets.register(SpritesheetID::HouseTier1, "art/sprites/house_tier1.png", UVec2::new(4, 1));
+    sheets.register(SpritesheetID::HouseTier2, "art/sprites/house_tier1.png", UVec2::new(4, 1));
+    sheets.register(SpritesheetID::HouseTier3, "art/sprites/house_tier1.png", UVec2::new(4, 1));
 }
 
 // Metadata for a single spritesheet image.
@@ -29,7 +56,7 @@ pub fn register_spritesheets(mut sheets: ResMut<SpritesheetRegistry>)
 pub struct SpritesheetDef
 {
     pub path: &'static str,
-    // Number of columns and rows in the sheet grid.
+    // Number of columns (variations) and rows (animation frames) in the sheet grid.
     pub grid: UVec2,
 }
 

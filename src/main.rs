@@ -1,10 +1,8 @@
 use bevy::{prelude::*, window::PresentMode};
 use worldbox::{
-    engine::{
-        EnginePlugin, GridPos, MapData,
-        prop::{PropType, spawn::SpawnPropExt},
-    },
-    entity::{EntityPlugin, spawn_animal, spawn_human},
+    engine::{EnginePlugin, GridPos, prop::PropType},
+    entity::{EntityPlugin, spawn_building, spawn_human},
+    faction::{FactionPlugin, FactionRegistry},
 };
 
 fn main()
@@ -23,18 +21,39 @@ fn main()
         )
         .add_plugins(EnginePlugin)
         .add_plugins(EntityPlugin)
+        .add_plugins(FactionPlugin)
         .add_systems(PostStartup, setup)
         .run();
 }
 
-fn setup(mut commands: Commands, map_data: Res<MapData>)
+fn setup(mut commands: Commands, mut factions: ResMut<FactionRegistry>)
 {
-    spawn_human(&mut commands, GridPos::new(5, 9), [15, 59, 125]);
-    spawn_animal(&mut commands, Vec2::new(15.5, 29.6), &map_data);
-    spawn_house(&mut commands, GridPos::new(513, 384));
-}
+    let empire = factions.add("Empire", [15, 59, 125]);
+    let forest = factions.add("Forest Clan", [34, 120, 56]);
 
-fn spawn_house(commands: &mut Commands, pos: GridPos)
-{
-    commands.spawn_prop(PropType::House, pos, ());
+    spawn_human(
+        &mut commands,
+        PropType::HumanImperialWalking,
+        GridPos::new(5, 9),
+        [15, 59, 125],
+        Some(empire),
+    );
+    spawn_human(
+        &mut commands,
+        PropType::HumanImperialWalking,
+        GridPos::new(8, 9),
+        [34, 120, 56],
+        Some(forest),
+    );
+    spawn_human(
+        &mut commands,
+        PropType::HumanImperialWalking,
+        GridPos::new(11, 9),
+        [200, 200, 200],
+        None,
+    );
+
+    spawn_building(&mut commands, PropType::HouseTier1, GridPos::new(513, 10), 0, Some(empire));
+    spawn_building(&mut commands, PropType::HouseTier1, GridPos::new(517, 10), 0, Some(forest));
+    spawn_building(&mut commands, PropType::HouseTier1, GridPos::new(521, 10), 0, None);
 }

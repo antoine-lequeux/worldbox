@@ -1,10 +1,13 @@
 use bevy::prelude::*;
 
-use crate::engine::{
-    coords::{GridPos, SyncGridPos},
-    mapgen::MapData,
-    prop::{*, spawn::SpawnPropExt},
-    rendering::MacroMapDot,
+use crate::{
+    engine::{
+        coords::{GridPos, SyncGridPos},
+        mapgen::MapData,
+        prop::{PropType, spawn::SpawnPropExt},
+        rendering::MacroMapDot,
+    },
+    faction::{BuildingColor, FactionId},
 };
 
 #[derive(Component)]
@@ -19,18 +22,47 @@ pub struct Human
 #[derive(Component)]
 pub struct Animal;
 
-pub fn spawn_human(commands: &mut Commands, pos: GridPos, color: [u8; 3])
+pub fn spawn_human(
+    commands: &mut Commands,
+    prop_type: PropType,
+    pos: GridPos,
+    color: [u8; 3],
+    faction: Option<FactionId>,
+)
 {
-    commands.spawn_prop(
-        PropType::HumanAnimation,
-        pos,
-        (
-            Human { color },
-            DynamicObject,
-            SyncGridPos,
-            MacroMapDot { color: [color[0], color[1], color[2], 255] },
-        ),
+    let base = (
+        Human { color },
+        DynamicObject,
+        SyncGridPos,
+        MacroMapDot { color: [color[0], color[1], color[2], 255] },
     );
+
+    match faction
+    {
+        Some(fid) => commands.spawn_prop(prop_type, pos, 1, (base, fid)),
+        None => commands.spawn_prop(prop_type, pos, 1, base),
+    }
+}
+
+pub fn spawn_building(
+    commands: &mut Commands,
+    prop_type: PropType,
+    pos: GridPos,
+    variation: u32,
+    faction: Option<FactionId>,
+)
+{
+    match faction
+    {
+        Some(fid) =>
+        {
+            commands.spawn_prop(prop_type, pos, variation, (BuildingColor::default(), fid));
+        },
+        None =>
+        {
+            commands.spawn_prop(prop_type, pos, variation, BuildingColor::default());
+        },
+    }
 }
 
 pub fn spawn_animal(commands: &mut Commands, pos: Vec2, map_data: &MapData)
