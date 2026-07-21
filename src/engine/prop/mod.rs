@@ -119,9 +119,13 @@ pub struct PropDefinition
 #[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum PropType
 {
+    HouseTier0,
     HouseTier1,
     HouseTier2,
     HouseTier3,
+    HouseTier4,
+    HouseTier5,
+    HouseTier6,
     HumanImperialWalking,
     HumanForestWalking,
     HumanNorthernWalking,
@@ -155,6 +159,18 @@ impl Default for PropRegistry
         let mut props = HashMap::new();
 
         props.insert(
+            PropType::HouseTier0,
+            PropDefinition {
+                sheet_id: SpritesheetID::HouseTier0,
+                size_tiles: UVec2::new(2, 2),
+                sprite: PropSprite::Static,
+                variation_count: 1,
+                sample_macro_colors: true,
+                macro_colors: Vec::new(),
+            },
+        );
+
+        props.insert(
             PropType::HouseTier1,
             PropDefinition {
                 sheet_id: SpritesheetID::HouseTier1,
@@ -183,6 +199,42 @@ impl Default for PropRegistry
             PropDefinition {
                 sheet_id: SpritesheetID::HouseTier3,
                 size_tiles: UVec2::new(2, 2),
+                sprite: PropSprite::Static,
+                variation_count: 4,
+                sample_macro_colors: true,
+                macro_colors: Vec::new(),
+            },
+        );
+
+        props.insert(
+            PropType::HouseTier4,
+            PropDefinition {
+                sheet_id: SpritesheetID::HouseTier4,
+                size_tiles: UVec2::new(3, 3),
+                sprite: PropSprite::Static,
+                variation_count: 4,
+                sample_macro_colors: true,
+                macro_colors: Vec::new(),
+            },
+        );
+
+        props.insert(
+            PropType::HouseTier5,
+            PropDefinition {
+                sheet_id: SpritesheetID::HouseTier5,
+                size_tiles: UVec2::new(4, 4),
+                sprite: PropSprite::Static,
+                variation_count: 4,
+                sample_macro_colors: true,
+                macro_colors: Vec::new(),
+            },
+        );
+
+        props.insert(
+            PropType::HouseTier6,
+            PropDefinition {
+                sheet_id: SpritesheetID::HouseTier6,
+                size_tiles: UVec2::new(4, 4),
                 sprite: PropSprite::Static,
                 variation_count: 4,
                 sample_macro_colors: true,

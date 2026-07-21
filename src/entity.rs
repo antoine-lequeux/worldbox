@@ -14,10 +14,7 @@ use crate::{
 pub struct DynamicObject;
 
 #[derive(Component)]
-pub struct Human
-{
-    pub color: [u8; 3],
-}
+pub struct Human;
 
 #[derive(Component)]
 pub struct Animal;
@@ -26,16 +23,10 @@ pub fn spawn_human(
     commands: &mut Commands,
     prop_type: PropType,
     pos: GridPos,
-    color: [u8; 3],
     faction: Option<FactionId>,
 )
 {
-    let base = (
-        Human { color },
-        DynamicObject,
-        SyncGridPos,
-        MacroMapDot { color: [color[0], color[1], color[2], 255] },
-    );
+    let base = (Human, DynamicObject, SyncGridPos, MacroMapDot { color: [255, 255, 255, 255] });
 
     match faction
     {

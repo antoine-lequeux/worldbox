@@ -61,6 +61,16 @@ impl FactionRegistry
     {
         return self.get(id).map(|f| f.color);
     }
+
+    pub fn active_ids(&self) -> Vec<FactionId>
+    {
+        return self
+            .factions
+            .iter()
+            .enumerate()
+            .filter_map(|(i, slot)| slot.as_ref().map(|_| FactionId(i as u32)))
+            .collect();
+    }
 }
 
 // Stores the current display color of a building entity.
@@ -106,19 +116,18 @@ fn handle_faction_deletions(
 // Syncs colors when an entity gains or changes its FactionId component.
 fn sync_on_faction_id_change(
     registry: Res<FactionRegistry>,
-    mut human_query: Query<(&FactionId, &mut MacroMapDot, &mut Human), Changed<FactionId>>,
+    mut human_query: Query<(&FactionId, &mut MacroMapDot), (Changed<FactionId>, With<Human>)>,
     mut building_query: Query<
         (&FactionId, &mut BuildingColor),
         (Changed<FactionId>, Without<Human>),
     >,
 )
 {
-    for (faction_id, mut dot, mut human) in &mut human_query
+    for (faction_id, mut dot) in &mut human_query
     {
         if let Some(color) = registry.color(*faction_id)
         {
             dot.color = [color[0], color[1], color[2], 255];
-            human.color = color;
         }
     }
 
@@ -134,7 +143,7 @@ fn sync_on_faction_id_change(
 // Resyncs all faction members when the FactionRegistry itself changes.
 fn sync_colors_on_registry_change(
     registry: Res<FactionRegistry>,
-    mut human_query: Query<(&FactionId, &mut MacroMapDot, &mut Human)>,
+    mut human_query: Query<(&FactionId, &mut MacroMapDot), With<Human>>,
     mut building_query: Query<(&FactionId, &mut BuildingColor), Without<Human>>,
 )
 {
@@ -143,12 +152,11 @@ fn sync_colors_on_registry_change(
         return;
     }
 
-    for (faction_id, mut dot, mut human) in &mut human_query
+    for (faction_id, mut dot) in &mut human_query
     {
         if let Some(color) = registry.color(*faction_id)
         {
             dot.color = [color[0], color[1], color[2], 255];
-            human.color = color;
         }
     }
 

@@ -11,9 +11,13 @@ pub enum SpritesheetID
     HumanForestWalking,
     HumanNorthernWalking,
     HumanTribalWalking,
+    HouseTier0,
     HouseTier1,
     HouseTier2,
     HouseTier3,
+    HouseTier4,
+    HouseTier5,
+    HouseTier6,
 }
 
 // All spritesheets must be registered here.
@@ -46,9 +50,13 @@ pub fn register_spritesheets(mut sheets: ResMut<SpritesheetRegistry>)
         UVec2::new(1, 4),
     );
 
+    sheets.register(SpritesheetID::HouseTier0, "art/sprites/house_tier0.png", UVec2::new(1, 1));
     sheets.register(SpritesheetID::HouseTier1, "art/sprites/house_tier1.png", UVec2::new(4, 1));
-    sheets.register(SpritesheetID::HouseTier2, "art/sprites/house_tier1.png", UVec2::new(4, 1));
-    sheets.register(SpritesheetID::HouseTier3, "art/sprites/house_tier1.png", UVec2::new(4, 1));
+    sheets.register(SpritesheetID::HouseTier2, "art/sprites/house_tier2.png", UVec2::new(4, 1));
+    sheets.register(SpritesheetID::HouseTier3, "art/sprites/house_tier3.png", UVec2::new(4, 1));
+    sheets.register(SpritesheetID::HouseTier4, "art/sprites/house_tier4.png", UVec2::new(4, 1));
+    sheets.register(SpritesheetID::HouseTier5, "art/sprites/house_tier5.png", UVec2::new(4, 1));
+    sheets.register(SpritesheetID::HouseTier6, "art/sprites/house_tier6.png", UVec2::new(4, 1));
 }
 
 // Metadata for a single spritesheet image.
