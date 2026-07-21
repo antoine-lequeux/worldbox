@@ -1,3 +1,4 @@
+pub mod colored_sprites;
 pub mod spawn;
 
 use std::collections::HashMap;
@@ -496,7 +497,13 @@ impl Plugin for PropPlugin
     {
         app.init_resource::<PropRegistry>()
             .init_resource::<PropSamplingState>()
+            .init_resource::<colored_sprites::ColoredSpriteCache>()
             .add_systems(Update, finish_prop_sampling.run_if(|s: Res<PropSamplingState>| !s.done))
-            .add_systems(Update, (update_animations, sync_sprite_frame).chain());
+            .add_systems(Update, (update_animations, sync_sprite_frame).chain())
+            .add_systems(
+                Update,
+                (colored_sprites::apply_building_colors, colored_sprites::gc_colored_sprites)
+                    .chain(),
+            );
     }
 }

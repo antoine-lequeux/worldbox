@@ -2,6 +2,7 @@ use bevy::prelude::*;
 
 mod autotile;
 pub mod border_outline;
+pub mod color_utils;
 pub mod macro_map;
 pub mod tilemap;
 

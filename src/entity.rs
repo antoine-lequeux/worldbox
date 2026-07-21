@@ -19,6 +19,12 @@ pub struct Human;
 #[derive(Component)]
 pub struct Animal;
 
+#[derive(Component)]
+pub struct House
+{
+    pub tier: u32,
+}
+
 pub fn spawn_human(
     commands: &mut Commands,
     prop_type: PropType,
@@ -43,15 +49,28 @@ pub fn spawn_building(
     faction: Option<FactionId>,
 )
 {
+    let tier = match prop_type
+    {
+        PropType::HouseTier0 => 0,
+        PropType::HouseTier1 => 1,
+        PropType::HouseTier2 => 2,
+        PropType::HouseTier3 => 3,
+        PropType::HouseTier4 => 4,
+        PropType::HouseTier5 => 5,
+        PropType::HouseTier6 => 6,
+        _ => 0,
+    };
+    let house = House { tier };
+
     match faction
     {
         Some(fid) =>
         {
-            commands.spawn_prop(prop_type, pos, variation, (BuildingColor::default(), fid));
+            commands.spawn_prop(prop_type, pos, variation, (BuildingColor::default(), fid, house));
         },
         None =>
         {
-            commands.spawn_prop(prop_type, pos, variation, BuildingColor::default());
+            commands.spawn_prop(prop_type, pos, variation, (BuildingColor::default(), house));
         },
     }
 }
