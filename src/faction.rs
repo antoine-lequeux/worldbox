@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-use crate::{engine::rendering::MacroMapDot, entity::Human};
+use crate::{engine::rendering::MacroMapEntity, entity::Human};
 
 // Identifies which faction an entity belongs to.
 // Absence of this component means the entity has no faction.
@@ -116,7 +116,7 @@ fn handle_faction_deletions(
 // Syncs colors when an entity gains or changes its FactionId component.
 fn sync_on_faction_id_change(
     registry: Res<FactionRegistry>,
-    mut human_query: Query<(&FactionId, &mut MacroMapDot), (Changed<FactionId>, With<Human>)>,
+    mut human_query: Query<(&FactionId, &mut MacroMapEntity), (Changed<FactionId>, With<Human>)>,
     mut building_query: Query<
         (&FactionId, &mut BuildingColor),
         (Changed<FactionId>, Without<Human>),
@@ -143,7 +143,7 @@ fn sync_on_faction_id_change(
 // Resyncs all faction members when the FactionRegistry itself changes.
 fn sync_colors_on_registry_change(
     registry: Res<FactionRegistry>,
-    mut human_query: Query<(&FactionId, &mut MacroMapDot), With<Human>>,
+    mut human_query: Query<(&FactionId, &mut MacroMapEntity), With<Human>>,
     mut building_query: Query<(&FactionId, &mut BuildingColor), Without<Human>>,
 )
 {

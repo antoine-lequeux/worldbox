@@ -4,17 +4,24 @@ use bevy::prelude::*;
 
 use crate::{
     engine::{
-        prop::{PropRegistry, PropType},
+        prop::{MacroSpriteChild, PropRegistry, PropType},
         rendering::color_utils::colorize_image,
         spritesheet::{SpritesheetID, SpritesheetRegistry},
     },
     faction::BuildingColor,
 };
 
+#[derive(Clone)]
+pub struct CachedVariants
+{
+    pub main: Handle<Image>,
+    pub macro_img: Option<Handle<Image>>,
+}
+
 #[derive(Resource, Default)]
 pub struct ColoredSpriteCache
 {
-    cache: HashMap<(SpritesheetID, [u8; 3]), Handle<Image>>,
+    cache: HashMap<(SpritesheetID, [u8; 3]), CachedVariants>,
     active_set: HashSet<(SpritesheetID, [u8; 3])>,
 }
 
@@ -26,23 +33,33 @@ impl ColoredSpriteCache
         color: [u8; 3],
         images: &mut Assets<Image>,
         sheets: &SpritesheetRegistry,
-    ) -> Option<Handle<Image>>
+    ) -> Option<CachedVariants>
     {
         let key = (sheet_id, color);
-        if let Some(handle) = self.cache.get(&key)
+        if let Some(variants) = self.cache.get(&key)
         {
-            return Some(handle.clone());
+            return Some(variants.clone());
         }
 
         let base_handle = sheets.images.get(&sheet_id)?;
         let base_image = images.get(base_handle)?;
-
         let new_image = colorize_image(base_image, color);
-        let new_handle = images.add(new_image);
+        let main = images.add(new_image);
 
-        self.cache.insert(key, new_handle.clone());
+        let mut macro_img = None;
+        if let Some(base_macro_handle) = sheets.macro_images.get(&sheet_id)
+        {
+            if let Some(base_macro_image) = images.get(base_macro_handle)
+            {
+                let new_macro = colorize_image(base_macro_image, color);
+                macro_img = Some(images.add(new_macro));
+            }
+        }
 
-        return Some(new_handle);
+        let variants = CachedVariants { main, macro_img };
+        self.cache.insert(key, variants.clone());
+
+        return Some(variants);
     }
 }
 
@@ -51,7 +68,11 @@ pub fn apply_building_colors(
     mut images: ResMut<Assets<Image>>,
     prop_registry: Res<PropRegistry>,
     sheet_registry: Res<SpritesheetRegistry>,
-    mut query: Query<(&PropType, &BuildingColor, &mut Sprite), Changed<BuildingColor>>,
+    mut query: Query<
+        (&PropType, &BuildingColor, &mut Sprite, Option<&MacroSpriteChild>),
+        Changed<BuildingColor>,
+    >,
+    mut child_sprites: Query<&mut Sprite, Without<PropType>>,
 )
 {
     if sheet_registry.images.is_empty()
@@ -59,7 +80,7 @@ pub fn apply_building_colors(
         return;
     }
 
-    for (prop_type, bcolor, mut sprite) in &mut query
+    for (prop_type, bcolor, mut sprite, macro_child) in &mut query
     {
         let Some(def) = prop_registry.props.get(prop_type)
         else
@@ -69,9 +90,20 @@ pub fn apply_building_colors(
         let sheet_id = def.sheet_id;
         let color = bcolor.color;
 
-        if let Some(new_handle) = cache.get_or_create(sheet_id, color, &mut images, &sheet_registry)
+        if let Some(variants) = cache.get_or_create(sheet_id, color, &mut images, &sheet_registry)
         {
-            sprite.image = new_handle;
+            sprite.image = variants.main;
+
+            if let Some(macro_handle) = variants.macro_img
+            {
+                if let Some(MacroSpriteChild(child_ent)) = macro_child
+                {
+                    if let Ok(mut child_sprite) = child_sprites.get_mut(*child_ent)
+                    {
+                        child_sprite.image = macro_handle;
+                    }
+                }
+            }
         }
     }
 }

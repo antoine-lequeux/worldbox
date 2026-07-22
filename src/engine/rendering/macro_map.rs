@@ -6,25 +6,15 @@ use bevy::{
 
 use super::tilemap::{ChunkCoord, StandardRenderLayer};
 use crate::engine::{
-    MACRO_MAP_ZOOM_THRESHOLD,
-    coords::GridPos,
-    mapgen::MapData,
-    painting::PaintSet,
-    prop::{AnimationState, PropRegistry, PropType, VariationIndex},
-    tile::TileRegistry,
+    MACRO_MAP_ZOOM_THRESHOLD, mapgen::MapData, painting::PaintSet, tile::TileRegistry,
 };
 
-// Component for entities that appear as a single colored pixel on the macro map.
+// Component for dynamic entities on the macro map.
 #[derive(Component)]
-pub struct MacroMapDot
+pub struct MacroMapEntity
 {
-    // RGBA color drawn on the macro map at this entity's grid position.
     pub color: [u8; 4],
 }
-
-// Holds the texture handle for the macro dots.
-#[derive(Resource)]
-pub struct MacroDotTexture(pub Handle<Image>);
 
 // Marker for an entity that syncs its transform to another entity.
 #[derive(Component)]
@@ -43,7 +33,7 @@ pub struct MacroMapChunk
 }
 
 // State machine controlling which rendering mode is active.
-#[derive(States, Default, Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(States, Default, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MapMode
 {
     #[default]
@@ -65,8 +55,6 @@ fn init_macro_engine(
     mut images: ResMut<Assets<Image>>,
     map_data: Res<MapData>,
     tile_registry: Res<TileRegistry>,
-    prop_registry: Res<PropRegistry>,
-    prop_query: Query<(&GridPos, &PropType, &VariationIndex, Option<&AnimationState>)>,
 )
 {
     let cs = map_data.chunk_size;
@@ -79,15 +67,7 @@ fn init_macro_engine(
         for cx in 0 .. map_data.chunks_x
         {
             let mut pixels = vec![0u8; (cs * cs * 4) as usize];
-            fill_macro_chunk_pixels(
-                &mut pixels,
-                cx,
-                cy,
-                &map_data,
-                &tile_registry,
-                &prop_registry,
-                &prop_query,
-            );
+            fill_macro_chunk_pixels(&mut pixels, cx, cy, &map_data, &tile_registry);
 
             let image = Image::new(
                 Extent3d { width: cs, height: cs, depth_or_array_layers: 1 },
@@ -117,48 +97,15 @@ fn init_macro_engine(
         }
     }
 
-    // Generate a 32x32 anti-aliased circle texture for macro dots.
-    let dot_size = 32;
-    let mut dot_pixels = vec![0u8; dot_size * dot_size * 4];
-    let center = dot_size as f32 / 2.0;
-    let radius = center - 1.0;
-    for y in 0 .. dot_size
-    {
-        for x in 0 .. dot_size
-        {
-            let dx = x as f32 + 0.5 - center;
-            let dy = y as f32 + 0.5 - center;
-            let dist = (dx * dx + dy * dy).sqrt();
-            let alpha = (1.0 - (dist - radius)).clamp(0.0, 1.0) * 255.0;
-            let idx = (y * dot_size + x) * 4;
-            dot_pixels[idx] = 255;
-            dot_pixels[idx + 1] = 255;
-            dot_pixels[idx + 2] = 255;
-            dot_pixels[idx + 3] = alpha as u8;
-        }
-    }
-    let dot_image = Image::new(
-        Extent3d { width: dot_size as u32, height: dot_size as u32, depth_or_array_layers: 1 },
-        TextureDimension::D2,
-        dot_pixels,
-        TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
-    );
-    let dot_texture = images.add(dot_image);
-    commands.insert_resource(MacroDotTexture(dot_texture));
-
     commands.insert_resource(MacroChunkData { chunk_handles });
 }
 
-// Composite base tiles and fixed props into a macro chunk's pixel buffer.
 fn fill_macro_chunk_pixels(
     pixels: &mut [u8],
     cx: u32,
     cy: u32,
     map_data: &MapData,
     tile_registry: &TileRegistry,
-    prop_registry: &PropRegistry,
-    prop_query: &Query<(&GridPos, &PropType, &VariationIndex, Option<&AnimationState>)>,
 )
 {
     let cs = map_data.chunk_size;
@@ -186,49 +133,13 @@ fn fill_macro_chunk_pixels(
             pixels[idx + 3] = 255;
         }
     }
-
-    // Draw fixed props.
-    for (pos, prop_type, variation_index, anim) in prop_query
-    {
-        let frame = anim.map(|a| a.current_frame).unwrap_or(0);
-        let variation = variation_index.0;
-
-        if let Some((size, colors)) = prop_registry.get_prop_data(*prop_type, frame, variation)
-        {
-            let mut i = 0;
-            for dy in 0 .. size.y
-            {
-                for dx in 0 .. size.x
-                {
-                    let px = pos.x + dx;
-                    let py = pos.y + (size.y - 1 - dy);
-
-                    // Check if this pixel falls inside this chunk.
-                    if px >= tile_x0 as i32
-                        && px < (tile_x0 + cs) as i32
-                        && py >= tile_y0 as i32
-                        && py < (tile_y0 + cs) as i32
-                    {
-                        let lx = (px - tile_x0 as i32) as u32;
-                        let ly = (py - tile_y0 as i32) as u32;
-                        let idx = (ly * cs + lx) as usize * 4;
-                        pixels[idx .. idx + 4].copy_from_slice(&colors[i]);
-                    }
-                    i += 1;
-                }
-            }
-        }
-    }
 }
 
-// Rebuild dirty macro chunks.
 fn update_tile_cache(
     mut map_data: ResMut<MapData>,
     macro_data: Res<MacroChunkData>,
     tile_registry: Res<TileRegistry>,
-    prop_registry: Res<PropRegistry>,
     mut images: ResMut<Assets<Image>>,
-    prop_query: Query<(&GridPos, &PropType, &VariationIndex, Option<&AnimationState>)>,
 )
 {
     for cy in 0 .. map_data.chunks_y
@@ -245,15 +156,7 @@ fn update_tile_cache(
             {
                 if let Some(data) = image.data.as_mut()
                 {
-                    fill_macro_chunk_pixels(
-                        data,
-                        cx,
-                        cy,
-                        &map_data,
-                        &tile_registry,
-                        &prop_registry,
-                        &prop_query,
-                    );
+                    fill_macro_chunk_pixels(data, cx, cy, &map_data, &tile_registry);
                 }
             }
         }
@@ -304,38 +207,39 @@ fn hide_macro(mut q: Query<&mut Visibility, With<MacroRenderLayer>>)
     }
 }
 
-// Spawns separate sprite entities for dots so they aren't hidden by their parent's
-// StandardRenderLayer.
-fn spawn_macro_dots(
+// Spawns separate sprite entities for dynamic objects.
+fn spawn_macro_entities(
     mut commands: Commands,
-    query: Query<(Entity, &MacroMapDot), Added<MacroMapDot>>,
+    query: Query<(Entity, &MacroMapEntity), Added<MacroMapEntity>>,
     map_data: Res<MapData>,
-    dot_texture: Res<MacroDotTexture>,
+    map_mode: Res<State<MapMode>>,
 )
 {
     let ts = map_data.tile_size as f32;
-    let diameter = ts * (2.0 / 3.0);
+    let initial_vis =
+        if *map_mode.get() == MapMode::Macro { Visibility::Inherited } else { Visibility::Hidden };
 
     for (entity, dot) in &query
     {
         commands.spawn((
             Sprite {
-                image: dot_texture.0.clone(),
                 color: Color::srgba_u8(dot.color[0], dot.color[1], dot.color[2], dot.color[3]),
-                custom_size: Some(Vec2::splat(diameter)),
+                custom_size: Some(Vec2::splat(ts)),
                 ..default()
             },
             Transform::from_xyz(0.0, 0.0, 1.1),
             MacroRenderLayer,
             FollowTransform(entity),
-            Visibility::Hidden,
+            initial_vis,
         ));
     }
 }
 
-// Syncs macro dot sprite transforms to their dynamic parents.
+// Syncs macro sprite transforms to their dynamic parents, snapping to the grid.
 fn sync_follow_transforms(
     map_mode: Res<State<MapMode>>,
+    map_data: Res<MapData>,
+    time: Res<Time>,
     parent_query: Query<&Transform, Without<FollowTransform>>,
     mut child_query: Query<(&mut Transform, &FollowTransform)>,
 )
@@ -345,19 +249,29 @@ fn sync_follow_transforms(
         return;
     }
 
+    let ts = map_data.tile_size as f32;
+    // We track a current Z to apply to entities every time they enter a new tile.
+    // Current Z is slowly incremented so that the last entity to enter a tile is displayed on top.
+    let current_z = 1.1 + (time.elapsed_secs() % 10000.0) * 0.00001;
+
     for (mut tf, follow) in &mut child_query
     {
         if let Ok(parent_tf) = parent_query.get(follow.0)
         {
-            let new_x = parent_tf.translation.x;
-            let new_y = parent_tf.translation.y;
+            let p_x = parent_tf.translation.x;
+            let p_y = parent_tf.translation.y;
+
+            let grid_x = (p_x / ts).floor();
+            let grid_y = (p_y / ts).floor();
+
+            let new_x = grid_x * ts + ts / 2.0;
+            let new_y = grid_y * ts + ts / 2.0;
 
             if tf.translation.x != new_x || tf.translation.y != new_y
             {
                 tf.translation.x = new_x;
                 tf.translation.y = new_y;
-                // Z=1.1 keeps dots on top of the Z=1.0 macro chunks.
-                tf.translation.z = 1.1;
+                tf.translation.z = current_z;
             }
         }
     }
@@ -399,7 +313,7 @@ impl Plugin for MacroMapPlugin
                 init_macro_engine.after(crate::engine::spritesheet::build_atlas_layouts),
             )
             .add_systems(Update, update_tile_cache.after(PaintSet))
-            .add_systems(Update, (handle_zoom_states, spawn_macro_dots, sync_follow_transforms))
+            .add_systems(Update, (handle_zoom_states, spawn_macro_entities, sync_follow_transforms))
             .add_systems(OnEnter(MapMode::Macro), (show_macro, hide_standard))
             .add_systems(OnEnter(MapMode::Standard), (show_standard, hide_macro));
     }

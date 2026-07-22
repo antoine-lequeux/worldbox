@@ -4,7 +4,10 @@ use super::{PropRegistry, PropType};
 use crate::engine::{
     coords::GridPos,
     mapgen::MapData,
-    rendering::StandardRenderLayer,
+    rendering::{
+        StandardRenderLayer,
+        macro_map::{MacroRenderLayer, MapMode},
+    },
     spritesheet::{AtlasLayoutState, SpritesheetRegistry},
 };
 
@@ -60,7 +63,6 @@ impl<B: Bundle> Command for SpawnProp<B>
     }
 }
 
-// Actually spawns the prop entity with its sprite bundle and world-space transform.
 fn spawn_prop_inner<B: Bundle>(
     world: &mut World,
     prop_type: PropType,
@@ -69,20 +71,65 @@ fn spawn_prop_inner<B: Bundle>(
     extra: B,
 )
 {
-    let (bundle, world_pos) = {
+    let map_mode = *world.resource::<State<MapMode>>().get();
+    let standard_vis =
+        if map_mode == MapMode::Standard { Visibility::Inherited } else { Visibility::Hidden };
+    let macro_vis =
+        if map_mode == MapMode::Macro { Visibility::Inherited } else { Visibility::Hidden };
+
+    let (bundle, macro_bundle, world_pos) = {
         let prop_registry = world.resource::<PropRegistry>();
         let sheet_registry = world.resource::<SpritesheetRegistry>();
         let map_data = world.resource::<MapData>();
-        let size_tiles = prop_registry
-            .props
-            .get(&prop_type)
-            .map(|d| d.size_tiles)
-            .unwrap_or(UVec2::ONE);
+
+        let def = prop_registry.props.get(&prop_type).unwrap();
+        let size_tiles = def.size_tiles;
+        let sheet_id = def.sheet_id;
+
         let bundle = prop_registry.sprite_bundle(prop_type, variation, sheet_registry);
         let world_pos = map_data.grid_to_prop_world(*pos, size_tiles);
-        (bundle, world_pos)
+
+        let macro_bundle = sheet_registry.macro_images.get(&sheet_id).map(|macro_img| {
+            let layout = sheet_registry.macro_layouts.get(&sheet_id).unwrap().clone();
+            let index = bundle.sprite.texture_atlas.as_ref().unwrap().index;
+            let ts = map_data.tile_size as f32;
+            (
+                Sprite {
+                    image: macro_img.clone(),
+                    custom_size: Some(Vec2::new(
+                        size_tiles.x as f32 * ts,
+                        size_tiles.y as f32 * ts,
+                    )),
+                    texture_atlas: Some(TextureAtlas { layout, index }),
+                    ..default()
+                },
+                Transform::from_translation(world_pos.with_z(1.1)),
+                MacroRenderLayer,
+                macro_vis,
+            )
+        });
+
+        (bundle, macro_bundle, world_pos)
     };
-    world.spawn((bundle, Transform::from_translation(world_pos), pos, StandardRenderLayer, extra));
+
+    let parent = world
+        .spawn((
+            bundle,
+            Transform::from_translation(world_pos),
+            pos,
+            StandardRenderLayer,
+            standard_vis,
+            extra,
+        ))
+        .id();
+
+    if let Some(macro_bundle) = macro_bundle
+    {
+        let child = world.spawn(macro_bundle).id();
+        world
+            .entity_mut(parent)
+            .insert(super::MacroSpriteChild(child));
+    }
 }
 
 // Flushes any deferred spawn operations once atlas layouts are available.

@@ -14,7 +14,7 @@ pub mod tile;
 pub use consts::*;
 pub use coords::GridPos;
 pub use mapgen::MapData;
-pub use rendering::{MacroMapDot, StandardRenderLayer};
+pub use rendering::{MacroMapEntity, StandardRenderLayer};
 
 pub struct EnginePlugin;
 

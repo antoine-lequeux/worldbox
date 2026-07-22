@@ -6,7 +6,7 @@ pub mod color_utils;
 pub mod macro_map;
 pub mod tilemap;
 
-pub use macro_map::MacroMapDot;
+pub use macro_map::MacroMapEntity;
 pub use tilemap::StandardRenderLayer;
 
 // Groups all rendering-related plugins (tilemap, macro map, border outline).

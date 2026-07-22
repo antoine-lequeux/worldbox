@@ -5,7 +5,7 @@ use crate::{
         coords::{GridPos, SyncGridPos},
         mapgen::MapData,
         prop::{PropType, spawn::SpawnPropExt},
-        rendering::MacroMapDot,
+        rendering::macro_map::MacroMapEntity,
     },
     faction::{BuildingColor, FactionId},
 };
@@ -32,7 +32,12 @@ pub fn spawn_human(
     faction: Option<FactionId>,
 )
 {
-    let base = (Human, DynamicObject, SyncGridPos, MacroMapDot { color: [255, 255, 255, 255] });
+    let base = (
+        Human,
+        DynamicObject,
+        SyncGridPos,
+        MacroMapEntity { color: [255, 255, 255, 255] },
+    );
 
     match faction
     {
@@ -84,7 +89,7 @@ pub fn spawn_animal(commands: &mut Commands, pos: Vec2, map_data: &MapData)
         Transform::from_translation(Vec3::new(pos.x, pos.y, 1.0)),
         DynamicObject,
         SyncGridPos,
-        MacroMapDot { color: [255, 255, 255, 255] },
+        MacroMapEntity { color: [255, 255, 255, 255] },
     ));
 }
 
