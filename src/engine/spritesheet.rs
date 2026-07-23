@@ -27,73 +27,73 @@ pub enum SpritesheetID
 //   grid.y = number of rows = number of animation frames
 pub fn register_spritesheets(mut sheets: ResMut<SpritesheetRegistry>)
 {
-    sheets.register(SpritesheetID::Terrain, "art/sprites/tileset.png", None, UVec2::new(1, 8));
+    sheets.register(SpritesheetID::Terrain, "art/tileset.png", None, UVec2::new(1, 8));
 
     sheets.register(
         SpritesheetID::HumanImperialWalking,
-        "art/sprites/human_imperial_walking.png",
+        "art/human_imperial_walking.png",
         None,
         UVec2::new(1, 4),
     );
     sheets.register(
         SpritesheetID::HumanForestWalking,
-        "art/sprites/human_forest_walking.png",
+        "art/human_forest_walking.png",
         None,
         UVec2::new(1, 4),
     );
     sheets.register(
         SpritesheetID::HumanNorthernWalking,
-        "art/sprites/human_northern_walking.png",
+        "art/human_northern_walking.png",
         None,
         UVec2::new(1, 4),
     );
     sheets.register(
         SpritesheetID::HumanTribalWalking,
-        "art/sprites/human_tribal_walking.png",
+        "art/human_tribal_walking.png",
         None,
         UVec2::new(1, 4),
     );
 
     sheets.register(
         SpritesheetID::HouseTier0,
-        "art/sprites/house_tier0.png",
-        Some("art/sprites/house_tier0_macro.png"),
+        "art/house_tier0.png",
+        Some("art/house_tier0_macro.png"),
         UVec2::new(1, 1),
     );
     sheets.register(
         SpritesheetID::HouseTier1,
-        "art/sprites/house_tier1.png",
-        Some("art/sprites/house_tier1_macro.png"),
+        "art/house_tier1.png",
+        Some("art/house_tier1_macro.png"),
         UVec2::new(4, 1),
     );
     sheets.register(
         SpritesheetID::HouseTier2,
-        "art/sprites/house_tier2.png",
-        Some("art/sprites/house_tier2_macro.png"),
+        "art/house_tier2.png",
+        Some("art/house_tier2_macro.png"),
         UVec2::new(4, 1),
     );
     sheets.register(
         SpritesheetID::HouseTier3,
-        "art/sprites/house_tier3.png",
-        Some("art/sprites/house_tier3_macro.png"),
+        "art/house_tier3.png",
+        Some("art/house_tier3_macro.png"),
         UVec2::new(4, 1),
     );
     sheets.register(
         SpritesheetID::HouseTier4,
-        "art/sprites/house_tier4.png",
-        Some("art/sprites/house_tier4_macro.png"),
+        "art/house_tier4.png",
+        Some("art/house_tier4_macro.png"),
         UVec2::new(4, 1),
     );
     sheets.register(
         SpritesheetID::HouseTier5,
-        "art/sprites/house_tier5.png",
-        Some("art/sprites/house_tier5_macro.png"),
+        "art/house_tier5.png",
+        Some("art/house_tier5_macro.png"),
         UVec2::new(4, 1),
     );
     sheets.register(
         SpritesheetID::HouseTier6,
-        "art/sprites/house_tier6.png",
-        Some("art/sprites/house_tier6_macro.png"),
+        "art/house_tier6.png",
+        Some("art/house_tier6_macro.png"),
         UVec2::new(4, 1),
     );
 }
