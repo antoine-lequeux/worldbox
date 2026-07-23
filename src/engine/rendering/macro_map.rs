@@ -24,14 +24,6 @@ pub struct FollowTransform(pub Entity);
 #[derive(Component)]
 pub struct MacroRenderLayer;
 
-// Identifies which chunk a macro map sprite belongs to.
-#[derive(Component)]
-pub struct MacroMapChunk
-{
-    pub cx: u32,
-    pub cy: u32,
-}
-
 // State machine controlling which rendering mode is active.
 #[derive(States, Default, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MapMode
@@ -41,12 +33,16 @@ pub enum MapMode
     Macro,
 }
 
+const MACRO_GROUP_SIZE: u32 = 10;
+
 // Holds the GPU image handles for macro map chunks.
 #[derive(Resource)]
 pub struct MacroChunkData
 {
-    // Indexed by cy * chunks_x + cx
-    pub chunk_handles: Vec<Handle<Image>>,
+    // Indexed by cy * groups_x + cx
+    pub group_handles: Vec<Handle<Image>>,
+    pub groups_x: u32,
+    pub groups_y: u32,
 }
 
 // Initializes the macro map: spawns chunk entities with placeholder textures.
@@ -59,78 +55,117 @@ fn init_macro_engine(
 {
     let cs = map_data.chunk_size;
     let ts = map_data.tile_size as f32;
-    let chunk_world_size = cs as f32 * ts;
-    let mut chunk_handles = Vec::with_capacity((map_data.chunks_x * map_data.chunks_y) as usize);
 
-    for cy in 0 .. map_data.chunks_y
+    let groups_x = (map_data.chunks_x + MACRO_GROUP_SIZE - 1) / MACRO_GROUP_SIZE;
+    let groups_y = (map_data.chunks_y + MACRO_GROUP_SIZE - 1) / MACRO_GROUP_SIZE;
+
+    let mut group_handles = Vec::with_capacity((groups_x * groups_y) as usize);
+
+    for gy in 0 .. groups_y
     {
-        for cx in 0 .. map_data.chunks_x
+        for gx in 0 .. groups_x
         {
-            let mut pixels = vec![0u8; (cs * cs * 4) as usize];
-            fill_macro_chunk_pixels(&mut pixels, cx, cy, &map_data, &tile_registry);
+            let cx_start = gx * MACRO_GROUP_SIZE;
+            let cx_end = (cx_start + MACRO_GROUP_SIZE).min(map_data.chunks_x);
+            let cy_start = gy * MACRO_GROUP_SIZE;
+            let cy_end = (cy_start + MACRO_GROUP_SIZE).min(map_data.chunks_y);
+
+            let w_chunks = cx_end - cx_start;
+            let h_chunks = cy_end - cy_start;
+
+            let tex_w = w_chunks * cs;
+            let tex_h = h_chunks * cs;
+
+            let mut pixels = vec![0u8; (tex_w * tex_h * 4) as usize];
+            fill_macro_group_pixels(
+                &mut pixels,
+                cx_start,
+                cx_end,
+                cy_start,
+                cy_end,
+                tex_w,
+                &map_data,
+                &tile_registry,
+            );
 
             let image = Image::new(
-                Extent3d { width: cs, height: cs, depth_or_array_layers: 1 },
+                Extent3d { width: tex_w, height: tex_h, depth_or_array_layers: 1 },
                 TextureDimension::D2,
                 pixels,
                 TextureFormat::Rgba8UnormSrgb,
                 RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
             );
             let handle = images.add(image);
-            chunk_handles.push(handle.clone());
+            group_handles.push(handle.clone());
 
-            let origin = map_data.chunk_world_origin(cx, cy);
-            let half = chunk_world_size / 2.0;
+            let origin_x = map_data.chunk_world_origin(cx_start, cy_start).x;
+            let origin_y = map_data.chunk_world_origin(cx_start, cy_start).y;
+
+            let world_w = tex_w as f32 * ts;
+            let world_h = tex_h as f32 * ts;
 
             commands.spawn((
                 Sprite {
                     image: handle,
-                    custom_size: Some(Vec2::splat(chunk_world_size)),
+                    custom_size: Some(Vec2::new(world_w, world_h)),
                     ..default()
                 },
-                Transform::from_xyz(origin.x + half, origin.y + half, 1.0)
+                Transform::from_xyz(origin_x + world_w / 2.0, origin_y + world_h / 2.0, 1.0)
                     .with_scale(Vec3::new(1.0, -1.0, 1.0)),
                 Visibility::Hidden,
-                MacroMapChunk { cx, cy },
                 MacroRenderLayer,
             ));
         }
     }
 
-    commands.insert_resource(MacroChunkData { chunk_handles });
+    commands.insert_resource(MacroChunkData { group_handles, groups_x, groups_y });
 }
 
-fn fill_macro_chunk_pixels(
+fn fill_macro_group_pixels(
     pixels: &mut [u8],
-    cx: u32,
-    cy: u32,
+    cx_start: u32,
+    cx_end: u32,
+    cy_start: u32,
+    cy_end: u32,
+    tex_w: u32,
     map_data: &MapData,
     tile_registry: &TileRegistry,
 )
 {
     let cs = map_data.chunk_size;
-    let tile_x0 = cx * cs;
-    let tile_y0 = cy * cs;
 
-    // Draw base tiles.
-    for ly in 0 .. cs
+    for cy in cy_start .. cy_end
     {
-        for lx in 0 .. cs
+        for cx in cx_start .. cx_end
         {
-            let gx = tile_x0 + lx;
-            let gy = tile_y0 + ly;
-            let tile_type = map_data.get_tile(gx, gy);
-            let color = tile_registry
-                .tiles
-                .get(&tile_type)
-                .map(|d| d.macro_color)
-                .unwrap_or([0, 0, 0]);
+            let tile_x0 = cx * cs;
+            let tile_y0 = cy * cs;
 
-            let idx = (ly * cs + lx) as usize * 4;
-            pixels[idx] = color[0];
-            pixels[idx + 1] = color[1];
-            pixels[idx + 2] = color[2];
-            pixels[idx + 3] = 255;
+            let local_chunk_x = cx - cx_start;
+            let local_chunk_y = cy - cy_start;
+
+            for ly in 0 .. cs
+            {
+                for lx in 0 .. cs
+                {
+                    let gx = tile_x0 + lx;
+                    let gy = tile_y0 + ly;
+                    let tile_type = map_data.get_tile(gx, gy);
+                    let color = tile_registry
+                        .tiles
+                        .get(&tile_type)
+                        .map(|d| d.macro_color)
+                        .unwrap_or([0, 0, 0]);
+
+                    let out_x = local_chunk_x * cs + lx;
+                    let out_y = local_chunk_y * cs + ly;
+                    let idx = (out_y * tex_w + out_x) as usize * 4;
+                    pixels[idx] = color[0];
+                    pixels[idx + 1] = color[1];
+                    pixels[idx + 2] = color[2];
+                    pixels[idx + 3] = 255;
+                }
+            }
         }
     }
 }
@@ -142,21 +177,46 @@ fn update_tile_cache(
     mut images: ResMut<Assets<Image>>,
 )
 {
-    for cy in 0 .. map_data.chunks_y
+    for gy in 0 .. macro_data.groups_y
     {
-        for cx in 0 .. map_data.chunks_x
+        for gx in 0 .. macro_data.groups_x
         {
-            if !map_data.take_macro_chunk_dirty(cx, cy)
+            let cx_start = gx * MACRO_GROUP_SIZE;
+            let cx_end = (cx_start + MACRO_GROUP_SIZE).min(map_data.chunks_x);
+            let cy_start = gy * MACRO_GROUP_SIZE;
+            let cy_end = (cy_start + MACRO_GROUP_SIZE).min(map_data.chunks_y);
+
+            let mut any_dirty = false;
+            for cy in cy_start .. cy_end
             {
-                continue;
+                for cx in cx_start .. cx_end
+                {
+                    if map_data.take_macro_chunk_dirty(cx, cy)
+                    {
+                        any_dirty = true;
+                    }
+                }
             }
 
-            let idx = (cy * map_data.chunks_x + cx) as usize;
-            if let Some(image) = images.get_mut(&macro_data.chunk_handles[idx])
+            if any_dirty
             {
-                if let Some(data) = image.data.as_mut()
+                let idx = (gy * macro_data.groups_x + gx) as usize;
+                if let Some(image) = images.get_mut(&macro_data.group_handles[idx])
                 {
-                    fill_macro_chunk_pixels(data, cx, cy, &map_data, &tile_registry);
+                    if let Some(data) = image.data.as_mut()
+                    {
+                        let tex_w = (cx_end - cx_start) * map_data.chunk_size;
+                        fill_macro_group_pixels(
+                            data,
+                            cx_start,
+                            cx_end,
+                            cy_start,
+                            cy_end,
+                            tex_w,
+                            &map_data,
+                            &tile_registry,
+                        );
+                    }
                 }
             }
         }
